@@ -124,7 +124,10 @@ class GPTLiveService(FrameProcessor):
         try:
             await self._transport.open()
         except BaseException:
-            await self._fail("provider_connection_failed")
+            await self._fail(
+                "provider_connection_failed",
+                message="provider connection failed",
+            )
             raise
 
     async def _interrupt(self) -> None:
@@ -236,16 +239,7 @@ class GPTLiveService(FrameProcessor):
             )
             return
         if event.type == "error":
-            await self._fail("provider_error")
-            await self._event_sink(
-                SessionEvent(
-                    session_id=self._session_id,
-                    type=SessionEventType.ERROR,
-                    state=SessionState.FAILED,
-                    error_code="provider_error",
-                    metadata={"message": event.message or "provider error"},
-                )
-            )
+            await self._fail("provider_error", message=event.message or "provider error")
 
     async def _transition(
         self,
@@ -266,17 +260,37 @@ class GPTLiveService(FrameProcessor):
             )
         )
 
-    async def _fail(self, error_code: str) -> None:
+    async def _fail(self, error_code: str, *, message: str) -> None:
+        previous = None
+        snapshot = None
         try:
-            await self._registry.transition(
+            previous = await self._registry.get(self._session_id)
+            snapshot = await self._registry.transition(
                 self._session_id,
                 SessionState.FAILED,
                 error_code=error_code,
             )
         except SessionRegistryError:
-            return
+            pass
         finally:
             await self._registry.release_audio(self._session_id)
+        if previous is not None and snapshot is not None and previous.state is not snapshot.state:
+            await self._event_sink(
+                SessionEvent(
+                    session_id=self._session_id,
+                    type=SessionEventType.SESSION_STATE_CHANGED,
+                    state=snapshot.state,
+                )
+            )
+        await self._event_sink(
+            SessionEvent(
+                session_id=self._session_id,
+                type=SessionEventType.ERROR,
+                state=SessionState.FAILED,
+                error_code=error_code,
+                metadata={"message": message},
+            )
+        )
 
 
 def _role(event: ProviderEvent) -> TranscriptRole | None:
