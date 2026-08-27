@@ -1,0 +1,223 @@
+"""Quicksilver v2 wire messages isolated from kassette's public contracts."""
+
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import dataclass
+from typing import Any, Literal, cast
+
+from kassette.credentials import CodexCredentials
+
+LIVE_MODEL = "gpt-live-1-codex"
+LIVE_VOICES = (
+    "arbor",
+    "breeze",
+    "cove",
+    "ember",
+    "juniper",
+    "maple",
+    "sol",
+    "spruce",
+    "vale",
+)
+LiveVoice = Literal[
+    "arbor",
+    "breeze",
+    "cove",
+    "ember",
+    "juniper",
+    "maple",
+    "sol",
+    "spruce",
+    "vale",
+]
+DEFAULT_LIVE_VOICE: LiveVoice = "sol"
+CODEX_BASE_URL = "https://chatgpt.com/backend-api"
+CODEX_CLIENT_VERSION = "0.144.1"
+SIGNALING_URL = f"{CODEX_BASE_URL}/codex/realtime/calls?intent=quicksilver&architecture=avas"
+LIVE_ORIGINATOR = "Codex Desktop"
+_CALL_ID = re.compile(r"^rtc_[\w-]+$")
+
+ProviderEventType = Literal[
+    "session.started",
+    "session.updated",
+    "output_audio.delta",
+    "input_transcript.added",
+    "output_transcript.added",
+    "turn.done",
+    "delegation.created",
+    "error",
+    "unknown",
+]
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderEvent:
+    type: ProviderEventType
+    session_id: str | None = None
+    role: Literal["user", "assistant"] | None = None
+    text: str | None = None
+    delegation_id: str | None = None
+    wire_type: str | None = None
+    message: str | None = None
+
+
+def build_session_payload(instructions: str, voice: LiveVoice) -> dict[str, Any]:
+    return {
+        "model": LIVE_MODEL,
+        "instructions": instructions,
+        "audio": {"output": {"voice": voice}},
+        "delegation": {"type": "client"},
+    }
+
+
+def build_live_headers(
+    credentials: CodexCredentials,
+    session_id: str,
+    realtime_session_id: str,
+) -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {credentials.access_token}",
+        "OpenAI-Alpha": "quicksilver=v2",
+        "User-Agent": f"Codex Desktop/{CODEX_CLIENT_VERSION}",
+        "x-session-id": realtime_session_id,
+        "originator": LIVE_ORIGINATOR,
+        "version": CODEX_CLIENT_VERSION,
+        "session-id": session_id,
+        "thread-id": session_id,
+        "chatgpt-account-id": credentials.account_id,
+    }
+
+
+def parse_call_id(location: str | None) -> str | None:
+    if not location:
+        return None
+    for segment in location.split("?", 1)[0].split("/"):
+        if _CALL_ID.fullmatch(segment):
+            return segment
+    return None
+
+
+def sideband_url(call_id: str) -> str:
+    if not _CALL_ID.fullmatch(call_id):
+        raise ValueError("invalid Quicksilver call ID")
+    return f"wss://api.openai.com/v1/live/{call_id}"
+
+
+def build_session_close() -> dict[str, str]:
+    return {"type": "session.close"}
+
+
+def build_delegation_unavailable(delegation_id: str) -> dict[str, Any]:
+    return {
+        "type": "delegation.context.append",
+        "delegation_item_id": delegation_id,
+        "content": [
+            {
+                "type": "input_text",
+                "text": "Delegation is unavailable in this voice client. Answer directly.",
+            }
+        ],
+    }
+
+
+def parse_provider_event(payload: str | bytes | dict[str, Any]) -> ProviderEvent | None:
+    parsed: object = payload
+    if isinstance(parsed, bytes):
+        try:
+            parsed = parsed.decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+    if isinstance(parsed, str):
+        try:
+            parsed = cast(object, json.loads(parsed))
+        except json.JSONDecodeError:
+            return None
+    event = _record(parsed)
+    if event is None:
+        return None
+    event_type = event.get("type")
+    if not isinstance(event_type, str):
+        return None
+
+    if event_type == "session.started" or event_type == "session.updated":
+        session = _record(event.get("session"))
+        if session is None:
+            return None
+        provider_session_id = session.get("id")
+        if not isinstance(provider_session_id, str):
+            return None
+        typed_event: Literal["session.started", "session.updated"] = event_type
+        return ProviderEvent(type=typed_event, session_id=provider_session_id)
+    if event_type == "input_transcript.added" or event_type == "output_transcript.added":
+        item = _record(event.get("item"))
+        if item is None:
+            return None
+        text = item.get("text")
+        if not isinstance(text, str):
+            return None
+        role: Literal["user", "assistant"] = (
+            "user" if event_type == "input_transcript.added" else "assistant"
+        )
+        transcript_event: Literal["input_transcript.added", "output_transcript.added"] = event_type
+        return ProviderEvent(type=transcript_event, role=role, text=text)
+    if event_type == "turn.done":
+        turn = _record(event.get("turn"))
+        if turn is None:
+            return None
+        raw_role = turn.get("role")
+        text = turn.get("transcript")
+        if raw_role not in {"user", "assistant"} or not isinstance(text, str):
+            return None
+        role = cast(Literal["user", "assistant"], raw_role)
+        return ProviderEvent(type="turn.done", role=role, text=text)
+    if event_type == "delegation.created":
+        item = _record(event.get("item"))
+        if item is None:
+            return None
+        delegation_id = item.get("id")
+        if not isinstance(delegation_id, str):
+            return None
+        content = item.get("content")
+        text_parts: list[str] = []
+        if isinstance(content, list):
+            for candidate in cast(list[object], content):
+                entry = _record(candidate)
+                text = entry.get("text") if entry else None
+                if isinstance(text, str):
+                    text_parts.append(text)
+        return ProviderEvent(
+            type="delegation.created",
+            delegation_id=delegation_id,
+            text="\n".join(text_parts),
+        )
+    if event_type == "error":
+        message = event.get("message")
+        if not isinstance(message, str):
+            error = _record(event.get("error"))
+            message = error.get("message") if error is not None else None
+        return ProviderEvent(
+            type="error",
+            message=message if isinstance(message, str) else "Quicksilver provider error",
+        )
+    if event_type == "output_audio.delta":
+        return ProviderEvent(type="output_audio.delta")
+    return ProviderEvent(type="unknown", wire_type=event_type)
+
+
+def _record(value: object) -> dict[str, object] | None:
+    if not isinstance(value, dict):
+        return None
+    return cast(dict[str, object], value)
+
+
+def safe_fixture(event: ProviderEvent) -> dict[str, str | None]:
+    """Return bounded event metadata without audio, auth, SDP, or raw payloads."""
+    return {
+        "type": event.type,
+        "role": event.role,
+        "wire_type": event.wire_type,
+        "has_text": str(bool(event.text)).lower(),
+        "has_error": str(bool(event.message)).lower(),
+    }
