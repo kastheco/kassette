@@ -1,6 +1,10 @@
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+import pytest
+from pipecat.frames.frames import Frame, InputAudioRawFrame, OutputAudioRawFrame
+from pipecat.processors.frame_processor import FrameDirection
+
 from kassette.credentials import CodexCredentials
 from kassette.domain import AudioChunk, SessionEvent, SessionEventType, SessionState
 from kassette.providers.quicksilver.protocol import ProviderEvent
@@ -23,23 +27,43 @@ class FakeTransport:
     ) -> None:
         self.event_sink = event_sink
         self.audio_sink = audio_sink
+        self.session_id = _kwargs["session_id"]
+        self.voice = _kwargs["voice"]
+        self.sent_audio: list[AudioChunk] = []
+        self.sent_messages: list[dict[str, Any]] = []
         self.interrupted = False
         self.closed = False
+        self.open_error: Exception | None = None
 
     async def open(self) -> None:
+        if self.open_error is not None:
+            raise self.open_error
         await self.event_sink(ProviderEvent(type="session.started", session_id="provider-1"))
 
     async def send_audio(self, chunk: AudioChunk) -> None:
-        del chunk
+        self.sent_audio.append(chunk)
 
     async def send(self, message: dict[str, Any]) -> None:
-        del message
+        self.sent_messages.append(message)
 
     async def interrupt(self) -> None:
         self.interrupted = True
 
     async def close(self) -> None:
         self.closed = True
+
+
+class RecordingGPTLiveService(GPTLiveService):
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.pushed_frames: list[tuple[Frame, FrameDirection]] = []
+
+    async def push_frame(
+        self,
+        frame: Frame,
+        direction: FrameDirection = FrameDirection.DOWNSTREAM,
+    ) -> None:
+        self.pushed_frames.append((frame, direction))
 
 
 async def test_fake_native_provider_completes_session_lifecycle() -> None:
@@ -77,3 +101,156 @@ async def test_fake_native_provider_completes_session_lifecycle() -> None:
     assert (await registry.get("voice-1")).state is SessionState.CLOSED
     assert await registry.audio_owner() is None
     assert SessionEventType.INTERRUPTED in {event.type for event in events}
+
+
+async def test_pipecat_and_quicksilver_exchange_audio_in_process() -> None:
+    registry = SessionRegistry()
+    await registry.create("voice-1")
+    transports: list[FakeTransport] = []
+
+    def create_transport(**kwargs: Any) -> FakeTransport:
+        transport = FakeTransport(**kwargs)
+        transports.append(transport)
+        return transport
+
+    service = RecordingGPTLiveService(
+        session_id="voice-1",
+        registry=registry,
+        credentials=FakeCredentials(),
+        transport_factory=create_transport,
+    )
+    await service._start_session()  # pyright: ignore[reportPrivateUsage]
+
+    client_audio = InputAudioRawFrame(audio=b"\x01\x00\x02\x00", sample_rate=16_000, num_channels=1)
+    await service.process_frame(client_audio, FrameDirection.DOWNSTREAM)
+    assert transports[0].sent_audio == [
+        AudioChunk(audio=client_audio.audio, sample_rate=16_000, num_channels=1)
+    ]
+
+    provider_audio = AudioChunk(audio=b"\x03\x00\x04\x00", sample_rate=24_000, num_channels=1)
+    await transports[0].audio_sink(provider_audio)
+    output = service.pushed_frames[-1]
+    assert isinstance(output[0], OutputAudioRawFrame)
+    assert output[0].audio == provider_audio.audio
+    assert output[0].sample_rate == 24_000
+    assert output[0].num_channels == 1
+    assert output[1] is FrameDirection.DOWNSTREAM
+
+
+async def test_provider_events_are_normalized_without_leaking_provider_behavior() -> None:
+    registry = SessionRegistry()
+    await registry.create("voice-1")
+    events: list[SessionEvent] = []
+    transports: list[FakeTransport] = []
+
+    async def collect(event: SessionEvent) -> None:
+        events.append(event)
+
+    def create_transport(**kwargs: Any) -> FakeTransport:
+        transport = FakeTransport(**kwargs)
+        transports.append(transport)
+        return transport
+
+    service = GPTLiveService(
+        session_id="voice-1",
+        registry=registry,
+        credentials=FakeCredentials(),
+        event_sink=collect,
+        transport_factory=create_transport,
+    )
+    await service._start_session()  # pyright: ignore[reportPrivateUsage]
+    transport = transports[0]
+
+    snapshot = await registry.get("voice-1")
+    assert snapshot.provider_session_id == "provider-1"
+    assert transport.session_id == "voice-1"
+    assert transport.voice == "sol"
+
+    await transport.event_sink(
+        ProviderEvent(type="input_transcript.added", role="user", text="hello")
+    )
+    await transport.audio_sink(AudioChunk(audio=b"\x01\x00", sample_rate=24_000, num_channels=1))
+    await transport.event_sink(ProviderEvent(type="turn.done", role="assistant", text="hi"))
+    await transport.event_sink(
+        ProviderEvent(type="delegation.created", delegation_id="delegation-1")
+    )
+
+    before_unknown = await registry.get("voice-1")
+    message_count = len(transport.sent_messages)
+    await transport.event_sink(ProviderEvent(type="unknown", wire_type="provider.future"))
+    assert await registry.get("voice-1") == before_unknown
+    assert len(transport.sent_messages) == message_count
+
+    assert transport.sent_messages == [
+        {
+            "type": "delegation.context.append",
+            "delegation_item_id": "delegation-1",
+            "content": [
+                {
+                    "type": "input_text",
+                    "text": "Delegation is unavailable in this voice client. Answer directly.",
+                }
+            ],
+        }
+    ]
+    assert [event.type for event in events] == [
+        SessionEventType.SESSION_STATE_CHANGED,
+        SessionEventType.SESSION_STATE_CHANGED,
+        SessionEventType.TRANSCRIPT_DELTA,
+        SessionEventType.SESSION_STATE_CHANGED,
+        SessionEventType.SPEECH_STARTED,
+        SessionEventType.SESSION_STATE_CHANGED,
+        SessionEventType.SPEECH_STOPPED,
+        SessionEventType.TRANSCRIPT_FINAL,
+        SessionEventType.DELEGATION_UNAVAILABLE,
+        SessionEventType.PROVIDER_UNKNOWN,
+    ]
+    assert events[2].text == "hello"
+    assert events[7].text == "hi"
+    assert events[-1].provider_type == "provider.future"
+
+
+async def test_provider_open_failure_emits_normalized_failure_event() -> None:
+    registry = SessionRegistry()
+    await registry.create("voice-1")
+    events: list[SessionEvent] = []
+    transports: list[FakeTransport] = []
+
+    async def collect(event: SessionEvent) -> None:
+        events.append(event)
+
+    def create_transport(**kwargs: Any) -> FakeTransport:
+        transport = FakeTransport(**kwargs)
+        transport.open_error = RuntimeError("provider unavailable")
+        transports.append(transport)
+        return transport
+
+    service = GPTLiveService(
+        session_id="voice-1",
+        registry=registry,
+        credentials=FakeCredentials(),
+        event_sink=collect,
+        transport_factory=create_transport,
+    )
+
+    with pytest.raises(RuntimeError, match="provider unavailable"):
+        await service._start_session()  # pyright: ignore[reportPrivateUsage]
+
+    snapshot = await registry.get("voice-1")
+    assert snapshot.state is SessionState.FAILED
+    assert snapshot.error_code == "provider_connection_failed"
+    assert await registry.audio_owner() is None
+    assert events[-2:] == [
+        SessionEvent(
+            session_id="voice-1",
+            type=SessionEventType.SESSION_STATE_CHANGED,
+            state=SessionState.FAILED,
+        ),
+        SessionEvent(
+            session_id="voice-1",
+            type=SessionEventType.ERROR,
+            state=SessionState.FAILED,
+            error_code="provider_connection_failed",
+            metadata={"message": "provider connection failed"},
+        ),
+    ]
