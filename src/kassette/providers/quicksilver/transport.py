@@ -133,6 +133,7 @@ class QuicksilverTransport:
         self._event_tasks: set[asyncio.Future[None]] = set()
         self._connected = False
         self._closed = False
+        self._close_task: asyncio.Task[None] | None = None
         self._disconnect_reported = False
 
     async def open(self) -> None:
@@ -193,6 +194,7 @@ class QuicksilverTransport:
             await peer.setRemoteDescription(RTCSessionDescription(sdp=answer, type="answer"))
             await self._wait_for_peer(peer)
             sideband = await self._connect_sideband(call_id, headers)
+            self._sideband = sideband
             self._connected = True
             self._sideband_task = asyncio.create_task(self._read_sideband(sideband))
         except BaseException:
@@ -213,10 +215,13 @@ class QuicksilverTransport:
         """Input audio drives provider-side barge-in; no separate wire command is known."""
 
     async def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        self._connected = False
+        if self._close_task is None:
+            self._closed = True
+            self._connected = False
+            self._close_task = asyncio.create_task(self._close())
+        await asyncio.shield(self._close_task)
+
+    async def _close(self) -> None:
         sideband = self._sideband
         self._sideband = None
         if sideband is not None and not sideband.closed:

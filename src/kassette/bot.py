@@ -44,24 +44,43 @@ class _SessionCloser:
         self._cancel_worker = cancel_worker
         self._close_provider = close_provider
         self._lock = asyncio.Lock()
-        self._stopped = False
+        self._task: asyncio.Task[None] | None = None
+        self._failure_reported = False
 
     async def __call__(self) -> None:
         async with self._lock:
-            if self._stopped:
+            if self._task is None:
+                self._task = asyncio.create_task(self._close())
+            task = self._task
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as error:
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
+                raise
+            await self._report_failure(error)
+        except BaseException as error:
+            await self._report_failure(error)
+
+    async def _close(self) -> None:
+        failure: BaseException | None = None
+        try:
+            await self._cancel_worker()
+        except BaseException as error:
+            failure = error
+        try:
+            await self._close_provider()
+        except BaseException as error:
+            failure = failure or error
+        if failure is not None:
+            raise failure
+
+    async def _report_failure(self, error: BaseException) -> None:
+        async with self._lock:
+            if self._failure_reported:
                 return
-            self._stopped = True
-            failure: BaseException | None = None
-            try:
-                await self._cancel_worker()
-            except BaseException as error:
-                failure = error
-            try:
-                await self._close_provider()
-            except BaseException as error:
-                failure = failure or error
-            if failure is not None:
-                raise failure
+            self._failure_reported = True
+        raise error
 
 
 async def _log_event(event: SessionEvent) -> None:

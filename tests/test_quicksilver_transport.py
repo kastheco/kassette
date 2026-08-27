@@ -99,6 +99,17 @@ class EndedSideband(HangingSideband):
         raise StopAsyncIteration
 
 
+class BlockingCloseSideband(HangingSideband):
+    def __init__(self) -> None:
+        self.close_started = asyncio.Event()
+        self.allow_close = asyncio.Event()
+
+    async def close(self, **_kwargs: object) -> None:
+        self.close_started.set()
+        await self.allow_close.wait()
+        self.closed = True
+
+
 class FakeResponse:
     ok = False
     status = 403
@@ -276,6 +287,30 @@ async def _open_connected_transport(
     await transport.open()
     assert FakePeer.latest is not None
     return transport, FakePeer.latest
+
+
+async def test_transport_cleanup_continues_after_caller_cancellation(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    events: list[ProviderEvent] = []
+    transport, _peer = await _open_connected_transport(monkeypatch, events, BlockingCloseSideband)
+    sideband = transport._sideband  # pyright: ignore[reportPrivateUsage]
+    assert isinstance(sideband, BlockingCloseSideband)
+
+    cancelled_caller = asyncio.create_task(transport.close())
+    await sideband.close_started.wait()
+    cancelled_caller.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled_caller
+
+    replacement_cleanup = asyncio.create_task(transport.close())
+    await asyncio.sleep(0)
+    assert not replacement_cleanup.done()
+
+    sideband.allow_close.set()
+    await replacement_cleanup
+    assert sideband.closed
 
 
 async def test_established_peer_disconnect_emits_one_terminal_error(
