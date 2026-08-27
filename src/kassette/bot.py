@@ -83,6 +83,31 @@ class _SessionCloser:
         raise error
 
 
+async def _await_finalizer(finalize: Callable[[], Awaitable[None]]) -> None:
+    task = asyncio.create_task(_invoke(finalize))
+    caller_cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if current is None or not current.cancelling():
+                raise
+            caller_cancelled = True
+        except BaseException:
+            if not caller_cancelled:
+                raise
+    if caller_cancelled:
+        if not task.cancelled():
+            task.exception()
+        raise asyncio.CancelledError
+    await task
+
+
+async def _invoke(callback: Callable[[], Awaitable[None]]) -> None:
+    await callback()
+
+
 async def _log_event(event: SessionEvent) -> None:
     safe = await _diagnostics.record(event)
     logger.info("kassette_event {}", json.dumps(safe, ensure_ascii=True, sort_keys=True))
@@ -141,16 +166,23 @@ async def run_session(
         if not started:
             logger.warning("kassette superseded voice session did not start")
     finally:
-        try:
-            await close_session()
-        finally:
-            await lifecycle.clear(handle)
+
+        async def finalize() -> None:
             try:
-                final_snapshot = await registry.get(session_id)
-            except SessionNotFoundError:
-                final_snapshot = None
-            if final_snapshot is not None and final_snapshot.state.value in {"closed", "failed"}:
-                await registry.reap(session_id, expected_generation=snapshot.generation)
+                await close_session()
+            finally:
+                await lifecycle.clear(handle)
+                try:
+                    final_snapshot = await registry.get(session_id)
+                except SessionNotFoundError:
+                    final_snapshot = None
+                if final_snapshot is not None and final_snapshot.state.value in {
+                    "closed",
+                    "failed",
+                }:
+                    await registry.reap(session_id, expected_generation=snapshot.generation)
+
+        await _await_finalizer(finalize)
 
 
 async def bot(runner_args: RunnerArguments) -> None:

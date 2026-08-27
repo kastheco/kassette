@@ -97,6 +97,7 @@ class GPTLiveService(FrameProcessor):
             audio_sink=self._handle_provider_audio,
         )
         self._close_lock = asyncio.Lock()
+        self._cleanup_task: asyncio.Task[None] | None = None
         self._interrupt_lock = asyncio.Lock()
         self._closed = False
         self._received_input = False
@@ -178,29 +179,33 @@ class GPTLiveService(FrameProcessor):
 
     async def _close(self) -> None:
         async with self._close_lock:
-            if self._closed:
-                return
-            self._closed = True
-            current = await self._is_current()
+            if self._cleanup_task is None:
+                self._closed = True
+                self._cleanup_task = asyncio.create_task(self._close_session())
+            task = self._cleanup_task
+        await asyncio.shield(task)
+
+    async def _close_session(self) -> None:
+        current = await self._is_current()
+        try:
+            if current:
+                snapshot = await self._registry.get(self._session_id)
+                if snapshot.state not in {SessionState.CLOSED, SessionState.FAILED}:
+                    await self._transition(SessionState.CLOSING)
+        finally:
             try:
-                if current:
-                    snapshot = await self._registry.get(self._session_id)
-                    if snapshot.state not in {SessionState.CLOSED, SessionState.FAILED}:
-                        await self._transition(SessionState.CLOSING)
+                await self._transport.close()
             finally:
                 try:
-                    await self._transport.close()
+                    if current and await self._is_current():
+                        snapshot = await self._registry.get(self._session_id)
+                        if snapshot.state is SessionState.CLOSING:
+                            await self._transition(SessionState.CLOSED)
                 finally:
-                    try:
-                        if current and await self._is_current():
-                            snapshot = await self._registry.get(self._session_id)
-                            if snapshot.state is SessionState.CLOSING:
-                                await self._transition(SessionState.CLOSED)
-                    finally:
-                        await self._registry.release_audio(
-                            self._session_id,
-                            expected_generation=self._generation,
-                        )
+                    await self._registry.release_audio(
+                        self._session_id,
+                        expected_generation=self._generation,
+                    )
 
     async def _handle_provider_audio(self, chunk: AudioChunk) -> None:
         if self._closed or not await self._is_current():
@@ -302,9 +307,15 @@ class GPTLiveService(FrameProcessor):
 
     async def _fail(self, error_code: str, *, message: str) -> None:
         async with self._close_lock:
-            if self._closed:
-                return
-            self._closed = True
+            if self._cleanup_task is None:
+                self._closed = True
+                self._cleanup_task = asyncio.create_task(
+                    self._fail_session(error_code, message=message)
+                )
+            task = self._cleanup_task
+        await asyncio.shield(task)
+
+    async def _fail_session(self, error_code: str, *, message: str) -> None:
         previous = None
         snapshot = None
         try:

@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -104,6 +105,53 @@ async def test_fake_native_provider_completes_session_lifecycle() -> None:
     assert (await registry.get("voice-1")).state is SessionState.CLOSED
     assert await registry.audio_owner() is None
     assert SessionEventType.INTERRUPTED in {event.type for event in events}
+
+
+async def test_service_cleanup_continues_after_caller_cancellation() -> None:
+    registry = SessionRegistry()
+    await registry.create("voice-1")
+    close_started = asyncio.Event()
+    allow_close = asyncio.Event()
+    transports: list[FakeTransport] = []
+
+    class BlockingCloseTransport(FakeTransport):
+        async def close(self) -> None:
+            close_started.set()
+            await allow_close.wait()
+            self.closed = True
+
+    def create_transport(**kwargs: Any) -> FakeTransport:
+        transport = BlockingCloseTransport(**kwargs)
+        transports.append(transport)
+        return transport
+
+    service = GPTLiveService(
+        session_id="voice-1",
+        registry=registry,
+        credentials=FakeCredentials(),
+        transport_factory=create_transport,
+    )
+    await service._start_session()  # pyright: ignore[reportPrivateUsage]
+
+    cancelled_caller = asyncio.create_task(
+        service._close()  # pyright: ignore[reportPrivateUsage]
+    )
+    await close_started.wait()
+    cancelled_caller.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled_caller
+
+    replacement_cleanup = asyncio.create_task(
+        service._close()  # pyright: ignore[reportPrivateUsage]
+    )
+    await asyncio.sleep(0)
+    assert not replacement_cleanup.done()
+
+    allow_close.set()
+    await replacement_cleanup
+    assert transports[0].closed
+    assert (await registry.get("voice-1")).state is SessionState.CLOSED
+    assert await registry.audio_owner() is None
 
 
 async def test_pipecat_and_quicksilver_exchange_audio_in_process() -> None:

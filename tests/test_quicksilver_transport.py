@@ -99,6 +99,11 @@ class EndedSideband(HangingSideband):
         raise StopAsyncIteration
 
 
+class CancelledSendSideband(HangingSideband):
+    async def send_json(self, _message: object) -> None:
+        raise asyncio.CancelledError
+
+
 class BlockingCloseSideband(HangingSideband):
     def __init__(self) -> None:
         self.close_started = asyncio.Event()
@@ -287,6 +292,19 @@ async def _open_connected_transport(
     await transport.open()
     assert FakePeer.latest is not None
     return transport, FakePeer.latest
+
+
+async def test_transport_cleanup_survives_independent_cancelled_error(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    events: list[ProviderEvent] = []
+    transport, _peer = await _open_connected_transport(monkeypatch, events, CancelledSendSideband)
+    sideband = transport._sideband  # pyright: ignore[reportPrivateUsage]
+    assert isinstance(sideband, CancelledSendSideband)
+
+    await transport.close()
+
+    assert sideband.closed
 
 
 async def test_transport_cleanup_continues_after_caller_cancellation(

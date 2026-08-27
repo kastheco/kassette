@@ -1,8 +1,13 @@
+# pyright: reportPrivateUsage=false
+
 import asyncio
 
 import pytest
 
-from kassette.bot import _SessionCloser  # pyright: ignore[reportPrivateUsage]
+from kassette.bot import (
+    _await_finalizer,
+    _SessionCloser,
+)
 
 
 async def test_session_cleanup_is_attempted_once_after_failure() -> None:
@@ -56,3 +61,28 @@ async def test_session_cleanup_continues_after_caller_cancellation() -> None:
     allow_cleanup.set()
     await replacement_cleanup
     assert provider_closed
+
+
+async def test_finalizer_completes_before_caller_cancellation_propagates() -> None:
+    finalizer_started = asyncio.Event()
+    allow_finalizer = asyncio.Event()
+    finalized = False
+
+    async def finalize() -> None:
+        nonlocal finalized
+        finalizer_started.set()
+        await allow_finalizer.wait()
+        finalized = True
+
+    caller = asyncio.create_task(_await_finalizer(finalize))
+    await finalizer_started.wait()
+    caller.cancel()
+    await asyncio.sleep(0)
+
+    assert not caller.done()
+    assert not finalized
+
+    allow_finalizer.set()
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+    assert finalized

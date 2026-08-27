@@ -225,9 +225,9 @@ class QuicksilverTransport:
         sideband = self._sideband
         self._sideband = None
         if sideband is not None and not sideband.closed:
-            with contextlib.suppress(Exception):
+            with contextlib.suppress(Exception, asyncio.CancelledError):
                 await sideband.send_json(build_session_close())
-            with contextlib.suppress(Exception):
+            with contextlib.suppress(Exception, asyncio.CancelledError):
                 await sideband.close(code=1000, message=b"done")
         if self._sideband_task is not None:
             sideband_task = self._sideband_task
@@ -249,15 +249,15 @@ class QuicksilverTransport:
             await asyncio.gather(*pending_events, return_exceptions=True)
         self._event_tasks.clear()
         if self._input_track is not None:
-            with contextlib.suppress(Exception):
+            with contextlib.suppress(Exception, asyncio.CancelledError):
                 await self._input_track.close()
             self._input_track = None
         if self._peer is not None:
-            with contextlib.suppress(Exception):
+            with contextlib.suppress(Exception, asyncio.CancelledError):
                 await self._peer.close()
             self._peer = None
         if self._http is not None:
-            with contextlib.suppress(Exception):
+            with contextlib.suppress(Exception, asyncio.CancelledError):
                 await self._http.close()
             self._http = None
 
