@@ -256,6 +256,59 @@ async def test_provider_open_failure_emits_normalized_failure_event() -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    ("provider_message", "expected_message"),
+    [("provider unavailable", "provider unavailable"), (None, "provider error")],
+)
+async def test_provider_error_emits_normalized_failure_event(
+    provider_message: str | None,
+    expected_message: str,
+) -> None:
+    registry = SessionRegistry()
+    await registry.create("voice-1")
+    events: list[SessionEvent] = []
+    transports: list[FakeTransport] = []
+
+    async def collect(event: SessionEvent) -> None:
+        events.append(event)
+
+    def create_transport(**kwargs: Any) -> FakeTransport:
+        transport = FakeTransport(**kwargs)
+        transports.append(transport)
+        return transport
+
+    service = GPTLiveService(
+        session_id="voice-1",
+        registry=registry,
+        credentials=FakeCredentials(),
+        event_sink=collect,
+        transport_factory=create_transport,
+    )
+    await service._start_session()  # pyright: ignore[reportPrivateUsage]
+    events.clear()
+
+    await transports[0].event_sink(ProviderEvent(type="error", message=provider_message))
+
+    snapshot = await registry.get("voice-1")
+    assert snapshot.state is SessionState.FAILED
+    assert snapshot.error_code == "provider_error"
+    assert await registry.audio_owner() is None
+    assert events == [
+        SessionEvent(
+            session_id="voice-1",
+            type=SessionEventType.SESSION_STATE_CHANGED,
+            state=SessionState.FAILED,
+        ),
+        SessionEvent(
+            session_id="voice-1",
+            type=SessionEventType.ERROR,
+            state=SessionState.FAILED,
+            error_code="provider_error",
+            metadata={"message": expected_message},
+        ),
+    ]
+
+
 async def test_repeated_provider_errors_emit_one_failed_state_change() -> None:
     registry = SessionRegistry()
     await registry.create("voice-1")
