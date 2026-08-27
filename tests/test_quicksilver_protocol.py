@@ -45,7 +45,24 @@ def test_parse_transcript_and_unknown_events() -> None:
     assert safe_fixture(unknown) == {
         "type": "unknown",
         "role": None,
-        "wire_type": "future.event",
+        "wire_type": "present",
         "has_text": "false",
         "has_error": "false",
     }
+
+
+def test_provider_text_and_identifiers_are_bounded() -> None:
+    transcript = parse_provider_event(
+        {
+            "type": "turn.done",
+            "turn": {"role": "assistant", "transcript": "x" * 100_000},
+        }
+    )
+    unknown = parse_provider_event({"type": "x" * 10_000})
+
+    assert transcript is not None
+    assert transcript.text is not None
+    assert len(transcript.text) == 32_000
+    assert unknown is not None
+    assert unknown.wire_type is not None
+    assert len(unknown.wire_type) == 128

@@ -40,6 +40,9 @@ from kassette.providers.quicksilver.protocol import (
 ProviderEventSink = Callable[[ProviderEvent], Awaitable[None]]
 ProviderAudioSink = Callable[[AudioChunk], Awaitable[None]]
 
+_MAX_SIGNALING_BODY_BYTES = 262_144
+_MAX_INPUT_AUDIO_BYTES = 65_536
+
 
 class QuicksilverTransportError(RuntimeError):
     code = "quicksilver_transport_error"
@@ -86,6 +89,8 @@ class _InputAudioTrack(MediaStreamTrack):
     def write(self, chunk: AudioChunk) -> None:
         if self.readyState == "ended":
             return
+        if len(chunk.audio) > _MAX_INPUT_AUDIO_BYTES:
+            raise QuicksilverTransportError("Quicksilver input audio chunk is too large")
         try:
             self._queue.put_nowait(chunk)
         except asyncio.QueueFull as error:
@@ -167,13 +172,19 @@ class QuicksilverTransport:
                     "session": build_session_payload(self._instructions, self._voice),
                 },
             ) as response:
-                answer = await response.text()
                 if not response.ok:
-                    detail = " ".join(answer.strip().split())[:2_048]
-                    suffix = f": {detail}" if detail else ""
                     raise QuicksilverTransportError(
-                        f"Quicksilver signaling failed with HTTP {response.status}{suffix}"
+                        f"Quicksilver signaling failed with HTTP {response.status}"
                     )
+                answer_bytes = await response.content.read(_MAX_SIGNALING_BODY_BYTES + 1)
+                if len(answer_bytes) > _MAX_SIGNALING_BODY_BYTES:
+                    raise QuicksilverTransportError("Quicksilver signaling response is too large")
+                try:
+                    answer = answer_bytes.decode("utf-8")
+                except UnicodeDecodeError as error:
+                    raise QuicksilverTransportError(
+                        "Quicksilver signaling returned invalid SDP"
+                    ) from error
                 call_id = parse_call_id(response.headers.get("location"))
                 if not call_id:
                     raise QuicksilverTransportError("Quicksilver signaling returned no call ID")
@@ -209,30 +220,38 @@ class QuicksilverTransport:
         if sideband is not None and not sideband.closed:
             with contextlib.suppress(Exception):
                 await sideband.send_json(build_session_close())
-            await sideband.close(code=1000, message=b"done")
+            with contextlib.suppress(Exception):
+                await sideband.close(code=1000, message=b"done")
         if self._sideband_task is not None:
-            self._sideband_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._sideband_task
+            sideband_task = self._sideband_task
+            if sideband_task is not asyncio.current_task():
+                sideband_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await sideband_task
             self._sideband_task = None
         for task in tuple(self._remote_audio_tasks):
             task.cancel()
         if self._remote_audio_tasks:
             await asyncio.gather(*self._remote_audio_tasks, return_exceptions=True)
         self._remote_audio_tasks.clear()
-        for task in tuple(self._event_tasks):
+        current = asyncio.current_task()
+        pending_events = {task for task in self._event_tasks if task is not current}
+        for task in pending_events:
             task.cancel()
-        if self._event_tasks:
-            await asyncio.gather(*self._event_tasks, return_exceptions=True)
+        if pending_events:
+            await asyncio.gather(*pending_events, return_exceptions=True)
         self._event_tasks.clear()
         if self._input_track is not None:
-            await self._input_track.close()
+            with contextlib.suppress(Exception):
+                await self._input_track.close()
             self._input_track = None
         if self._peer is not None:
-            await self._peer.close()
+            with contextlib.suppress(Exception):
+                await self._peer.close()
             self._peer = None
         if self._http is not None:
-            await self._http.close()
+            with contextlib.suppress(Exception):
+                await self._http.close()
             self._http = None
 
     def _install_peer_handlers(self, peer: RTCPeerConnection, channel: RTCDataChannel) -> None:
@@ -280,6 +299,7 @@ class QuicksilverTransport:
                 sideband = await self._http.ws_connect(
                     sideband_url(call_id),
                     headers=headers,
+                    max_msg_size=_MAX_SIGNALING_BODY_BYTES,
                 )
                 self._sideband = sideband
                 self._sideband_task = asyncio.create_task(self._read_sideband(sideband))

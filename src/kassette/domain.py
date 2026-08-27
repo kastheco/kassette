@@ -77,6 +77,7 @@ class SessionEvent:
 class VoiceSessionSnapshot:
     id: str
     state: SessionState
+    generation: int = 1
     provider_session_id: str | None = None
     error_code: str | None = None
 

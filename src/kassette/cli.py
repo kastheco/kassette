@@ -13,6 +13,11 @@ app = typer.Typer(no_args_is_help=True, help="Run and inspect the local kassette
 _LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
 
 
+def _loopback_url(host: str, port: int, path: str = "") -> str:
+    authority = f"[{host}]" if ":" in host else host
+    return f"http://{authority}:{port}{path}"
+
+
 @app.command()
 def serve(
     host: Annotated[str, typer.Option(help="Loopback address to bind.")] = "127.0.0.1",
@@ -24,7 +29,8 @@ def serve(
             "the first delivery only permits loopback addresses",
             param_hint="host",
         )
-    typer.echo(f"Starting kassette on http://{host}:{port}")
+    origin = _loopback_url(host, port)
+    typer.echo(f"Starting kassette on {origin}")
     os.execv(
         sys.executable,
         [
@@ -38,7 +44,7 @@ def serve(
             "--port",
             str(port),
             "--allowed-origins",
-            f"http://{host}:{port}",
+            origin,
         ],
     )
 
@@ -54,7 +60,7 @@ def call(
             "the first delivery only permits loopback addresses",
             param_hint="host",
         )
-    url = f"http://{host}:{port}/client"
+    url = _loopback_url(host, port, "/client")
     typer.echo(f"Opening kassette voice client at {url}")
     if not webbrowser.open(url):
         raise typer.Exit(code=1)

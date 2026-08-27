@@ -38,6 +38,11 @@ CODEX_CLIENT_VERSION = "0.144.1"
 SIGNALING_URL = f"{CODEX_BASE_URL}/codex/realtime/calls?intent=quicksilver&architecture=avas"
 LIVE_ORIGINATOR = "Codex Desktop"
 _CALL_ID = re.compile(r"^rtc_[\w-]+$")
+_MAX_PROVIDER_PAYLOAD_BYTES = 262_144
+_MAX_PROVIDER_TEXT_CHARS = 32_000
+_MAX_PROVIDER_ID_CHARS = 256
+_MAX_PROVIDER_TYPE_CHARS = 128
+_MAX_PROVIDER_ERROR_CHARS = 2_048
 
 ProviderEventType = Literal[
     "session.started",
@@ -125,11 +130,17 @@ def build_delegation_unavailable(delegation_id: str) -> dict[str, Any]:
 def parse_provider_event(payload: str | bytes | dict[str, Any]) -> ProviderEvent | None:
     parsed: object = payload
     if isinstance(parsed, bytes):
+        if len(parsed) > _MAX_PROVIDER_PAYLOAD_BYTES:
+            return None
         try:
             parsed = parsed.decode("utf-8")
         except UnicodeDecodeError:
             return None
     if isinstance(parsed, str):
+        if len(parsed) > _MAX_PROVIDER_PAYLOAD_BYTES:
+            return None
+        if len(parsed.encode("utf-8")) > _MAX_PROVIDER_PAYLOAD_BYTES:
+            return None
         try:
             parsed = cast(object, json.loads(parsed))
         except json.JSONDecodeError:
@@ -149,7 +160,10 @@ def parse_provider_event(payload: str | bytes | dict[str, Any]) -> ProviderEvent
         if not isinstance(provider_session_id, str):
             return None
         typed_event: Literal["session.started", "session.updated"] = event_type
-        return ProviderEvent(type=typed_event, session_id=provider_session_id)
+        return ProviderEvent(
+            type=typed_event,
+            session_id=provider_session_id[:_MAX_PROVIDER_ID_CHARS],
+        )
     if event_type == "input_transcript.added" or event_type == "output_transcript.added":
         item = _record(event.get("item"))
         if item is None:
@@ -161,7 +175,11 @@ def parse_provider_event(payload: str | bytes | dict[str, Any]) -> ProviderEvent
             "user" if event_type == "input_transcript.added" else "assistant"
         )
         transcript_event: Literal["input_transcript.added", "output_transcript.added"] = event_type
-        return ProviderEvent(type=transcript_event, role=role, text=text)
+        return ProviderEvent(
+            type=transcript_event,
+            role=role,
+            text=text[:_MAX_PROVIDER_TEXT_CHARS],
+        )
     if event_type == "turn.done":
         turn = _record(event.get("turn"))
         if turn is None:
@@ -171,7 +189,11 @@ def parse_provider_event(payload: str | bytes | dict[str, Any]) -> ProviderEvent
         if raw_role not in {"user", "assistant"} or not isinstance(text, str):
             return None
         role = cast(Literal["user", "assistant"], raw_role)
-        return ProviderEvent(type="turn.done", role=role, text=text)
+        return ProviderEvent(
+            type="turn.done",
+            role=role,
+            text=text[:_MAX_PROVIDER_TEXT_CHARS],
+        )
     if event_type == "delegation.created":
         item = _record(event.get("item"))
         if item is None:
@@ -189,8 +211,8 @@ def parse_provider_event(payload: str | bytes | dict[str, Any]) -> ProviderEvent
                     text_parts.append(text)
         return ProviderEvent(
             type="delegation.created",
-            delegation_id=delegation_id,
-            text="\n".join(text_parts),
+            delegation_id=delegation_id[:_MAX_PROVIDER_ID_CHARS],
+            text="\n".join(text_parts)[:_MAX_PROVIDER_TEXT_CHARS],
         )
     if event_type == "error":
         message = event.get("message")
@@ -199,11 +221,15 @@ def parse_provider_event(payload: str | bytes | dict[str, Any]) -> ProviderEvent
             message = error.get("message") if error is not None else None
         return ProviderEvent(
             type="error",
-            message=message if isinstance(message, str) else "Quicksilver provider error",
+            message=(
+                message[:_MAX_PROVIDER_ERROR_CHARS]
+                if isinstance(message, str)
+                else "Quicksilver provider error"
+            ),
         )
     if event_type == "output_audio.delta":
         return ProviderEvent(type="output_audio.delta")
-    return ProviderEvent(type="unknown", wire_type=event_type)
+    return ProviderEvent(type="unknown", wire_type=event_type[:_MAX_PROVIDER_TYPE_CHARS])
 
 
 def _record(value: object) -> dict[str, object] | None:
@@ -217,7 +243,7 @@ def safe_fixture(event: ProviderEvent) -> dict[str, str | None]:
     return {
         "type": event.type,
         "role": event.role,
-        "wire_type": event.wire_type,
+        "wire_type": "present" if event.wire_type is not None else None,
         "has_text": str(bool(event.text)).lower(),
         "has_error": str(bool(event.message)).lower(),
     }

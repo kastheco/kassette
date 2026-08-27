@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 from uuid import uuid4
@@ -16,40 +17,46 @@ from pipecat.runner.utils import create_transport  # pyright: ignore[reportUnkno
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.workers.runner import WorkerRunner
 
-from kassette.credentials import PiAuthCredentialProvider
+from kassette.credentials import CodexCredentialProvider, PiAuthCredentialProvider
+from kassette.diagnostics import LifecycleDiagnostics
 from kassette.domain import SessionEvent
-from kassette.providers.quicksilver.service import GPTLiveService
-from kassette.sessions import SessionRegistry
+from kassette.providers.quicksilver.service import GPTLiveService, TransportFactory
+from kassette.providers.quicksilver.transport import QuicksilverTransport
+from kassette.sessions import (
+    LiveSessionCoordinator,
+    SessionHandle,
+    SessionNotFoundError,
+    SessionRegistry,
+)
 
 _registry = SessionRegistry()
+_lifecycle = LiveSessionCoordinator()
+_diagnostics = LifecycleDiagnostics()
 
 
 async def _log_event(event: SessionEvent) -> None:
-    safe = {
-        "session_id": event.session_id,
-        "type": event.type,
-        "state": event.state,
-        "role": event.role,
-        "has_text": event.text is not None,
-        "text_chars": len(event.text) if event.text else 0,
-        "provider_type": event.provider_type,
-        "error_code": event.error_code,
-        "metadata_keys": sorted(event.metadata),
-    }
-    logger.info("kassette_event {}", json.dumps(safe, default=str, ensure_ascii=False))
+    safe = await _diagnostics.record(event)
+    logger.info("kassette_event {}", json.dumps(safe, ensure_ascii=True, sort_keys=True))
 
 
 async def run_session(
     transport: BaseTransport,
     runner_args: SmallWebRTCRunnerArguments,
+    *,
+    registry: SessionRegistry = _registry,
+    lifecycle: LiveSessionCoordinator = _lifecycle,
+    credential_provider: CodexCredentialProvider | None = None,
+    provider_transport_factory: TransportFactory = QuicksilverTransport,
 ) -> None:
     session_id = runner_args.session_id or str(uuid4())
-    await _registry.create(session_id)
+    snapshot = await registry.create(session_id)
     service = GPTLiveService(
         session_id=session_id,
-        registry=_registry,
-        credentials=PiAuthCredentialProvider(),
+        generation=snapshot.generation,
+        registry=registry,
+        credentials=credential_provider or PiAuthCredentialProvider(),
         event_sink=_log_event,
+        transport_factory=provider_transport_factory,
     )
     pipeline = Pipeline([transport.input(), service, transport.output()])
     worker = PipelineWorker(
@@ -61,19 +68,52 @@ async def run_session(
     async def on_client_connected(_transport: BaseTransport, _client: Any) -> None:
         logger.info("kassette client connected to voice session {}", session_id)
 
+    runner = WorkerRunner(handle_sigint=False)
+    await runner.add_workers(worker)
+    close_lock = asyncio.Lock()
+    stopped = False
+
+    async def close_session() -> None:
+        nonlocal stopped
+        async with close_lock:
+            if stopped:
+                return
+            failure: BaseException | None = None
+            try:
+                await worker.cancel()
+            except BaseException as error:
+                failure = error
+            try:
+                await service._close()  # pyright: ignore[reportPrivateUsage]
+            except BaseException as error:
+                failure = failure or error
+            if failure is not None:
+                raise failure
+            stopped = True
+
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(_transport: BaseTransport, _client: Any) -> None:
         logger.info("kassette client disconnected from voice session {}", session_id)
-        await worker.cancel()
+        await close_session()
 
-    runner = WorkerRunner(handle_sigint=False)
-    await runner.add_workers(worker)
+    handle = SessionHandle(session_id, snapshot.generation)
     try:
+        await lifecycle.replace(
+            handle=handle,
+            close=close_session,
+        )
         await runner.run()
     finally:
-        snapshot = await _registry.get(session_id)
-        if snapshot.state.value in {"closed", "failed"}:
-            await _registry.reap(session_id)
+        try:
+            await close_session()
+        finally:
+            await lifecycle.clear(handle)
+            try:
+                final_snapshot = await registry.get(session_id)
+            except SessionNotFoundError:
+                final_snapshot = None
+            if final_snapshot is not None and final_snapshot.state.value in {"closed", "failed"}:
+                await registry.reap(session_id, expected_generation=snapshot.generation)
 
 
 async def bot(runner_args: RunnerArguments) -> None:

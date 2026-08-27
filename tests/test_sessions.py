@@ -4,6 +4,8 @@ from kassette.domain import SessionState
 from kassette.sessions import (
     AudioDeviceBusyError,
     InvalidSessionTransitionError,
+    LiveSessionCoordinator,
+    SessionHandle,
     SessionRegistry,
 )
 
@@ -39,3 +41,38 @@ async def test_registry_rejects_invalid_transition() -> None:
 
     with pytest.raises(InvalidSessionTransitionError):
         await registry.transition(session.id, SessionState.SPEAKING)
+
+
+async def test_recreated_session_rejects_stale_lease_release() -> None:
+    registry = SessionRegistry()
+    first = await registry.create("voice")
+    await registry.acquire_audio("voice", expected_generation=first.generation)
+    await registry.transition("voice", SessionState.FAILED)
+    await registry.reap("voice", expected_generation=first.generation)
+
+    second = await registry.create("voice")
+    await registry.acquire_audio("voice", expected_generation=second.generation)
+    await registry.release_audio("voice", expected_generation=first.generation)
+
+    assert second.generation == first.generation + 1
+    assert await registry.audio_owner() == "voice"
+
+
+async def test_reconnect_closes_previous_session_and_stale_clear_is_ignored() -> None:
+    coordinator = LiveSessionCoordinator()
+    closed: list[str] = []
+    first = SessionHandle("first", 1)
+    second = SessionHandle("second", 1)
+
+    async def close_first() -> None:
+        closed.append("first")
+
+    async def close_second() -> None:
+        closed.append("second")
+
+    await coordinator.replace(first, close_first)
+    await coordinator.replace(second, close_second)
+    await coordinator.clear(first)
+
+    assert closed == ["first"]
+    assert await coordinator.active() == second
