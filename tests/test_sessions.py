@@ -187,6 +187,42 @@ async def test_newer_replacement_cancels_started_stale_runner() -> None:
     assert await coordinator.active() == second
 
 
+async def test_replacement_waits_for_cancellation_delayed_stale_runner() -> None:
+    coordinator = LiveSessionCoordinator()
+    first = SessionHandle("first", 1)
+    second = SessionHandle("second", 1)
+    runner_started = asyncio.Event()
+    cancellation_seen = asyncio.Event()
+    allow_stale_exit = asyncio.Event()
+
+    async def close_session() -> None:
+        return
+
+    async def run_first() -> None:
+        runner_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancellation_seen.set()
+            await allow_stale_exit.wait()
+            raise
+
+    await coordinator.replace(first, close_session)
+    running = asyncio.create_task(coordinator.run_active(first, run_first))
+    await runner_started.wait()
+    replacement = asyncio.create_task(coordinator.replace(second, close_session))
+    await cancellation_seen.wait()
+
+    assert not replacement.done()
+    assert await coordinator.active() == first
+
+    allow_stale_exit.set()
+    assert await replacement
+    with pytest.raises(asyncio.CancelledError):
+        await running
+    assert await coordinator.active() == second
+
+
 @pytest.mark.parametrize("session_id", ["x" * 97, "line\nbreak"])
 async def test_registry_rejects_unbounded_or_controlled_session_ids(session_id: str) -> None:
     registry = SessionRegistry()

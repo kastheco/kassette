@@ -43,6 +43,7 @@ _MAX_PROVIDER_TEXT_CHARS = 32_000
 _MAX_PROVIDER_ID_CHARS = 256
 _MAX_PROVIDER_TYPE_CHARS = 128
 _MAX_PROVIDER_ERROR_CHARS = 2_048
+_MAX_PROVIDER_COLLECTION_ITEMS = 64
 
 ProviderEventType = Literal[
     "session.started",
@@ -203,12 +204,22 @@ def parse_provider_event(payload: str | bytes | dict[str, Any]) -> ProviderEvent
             return None
         content = item.get("content")
         text_parts: list[str] = []
+        text_chars = 0
         if isinstance(content, list):
-            for candidate in cast(list[object], content):
+            content_items = cast(list[object], content)
+            if len(content_items) > _MAX_PROVIDER_COLLECTION_ITEMS:
+                return None
+            for candidate in content_items:
                 entry = _record(candidate)
                 text = entry.get("text") if entry else None
-                if isinstance(text, str):
-                    text_parts.append(text)
+                if not isinstance(text, str):
+                    continue
+                separator_chars = 1 if text_parts else 0
+                remaining = _MAX_PROVIDER_TEXT_CHARS - text_chars - separator_chars
+                if remaining <= 0:
+                    break
+                text_parts.append(text[:remaining])
+                text_chars += min(len(text), remaining) + separator_chars
         return ProviderEvent(
             type="delegation.created",
             delegation_id=delegation_id[:_MAX_PROVIDER_ID_CHARS],
@@ -235,7 +246,10 @@ def parse_provider_event(payload: str | bytes | dict[str, Any]) -> ProviderEvent
 def _record(value: object) -> dict[str, object] | None:
     if not isinstance(value, dict):
         return None
-    return cast(dict[str, object], value)
+    record = cast(dict[object, object], value)
+    if len(record) > _MAX_PROVIDER_COLLECTION_ITEMS:
+        return None
+    return cast(dict[str, object], record)
 
 
 def safe_fixture(event: ProviderEvent) -> dict[str, str | None]:

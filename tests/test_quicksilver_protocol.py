@@ -66,3 +66,35 @@ def test_provider_text_and_identifiers_are_bounded() -> None:
     assert unknown is not None
     assert unknown.wire_type is not None
     assert len(unknown.wire_type) == 128
+
+
+def test_direct_provider_collections_are_bounded_before_traversal() -> None:
+    oversized_event: dict[str, object] = {
+        "type": "turn.done",
+        "turn": {"role": "assistant", "transcript": "hello"},
+        **{f"extra-{index}": index for index in range(64)},
+    }
+    oversized_content = parse_provider_event(
+        {
+            "type": "delegation.created",
+            "item": {
+                "id": "delegation-1",
+                "content": [{"text": "x"} for _ in range(65)],
+            },
+        }
+    )
+    bounded_content = parse_provider_event(
+        {
+            "type": "delegation.created",
+            "item": {
+                "id": "delegation-1",
+                "content": [{"text": "x" * 10_000} for _ in range(64)],
+            },
+        }
+    )
+
+    assert parse_provider_event(oversized_event) is None
+    assert oversized_content is None
+    assert bounded_content is not None
+    assert bounded_content.text is not None
+    assert len(bounded_content.text) == 32_000

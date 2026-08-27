@@ -89,6 +89,14 @@ class LiveSessionCoordinator:
                 async def close_started_session() -> None:
                     if not run_task.done():
                         run_task.cancel()
+                    try:
+                        await run_task
+                    except asyncio.CancelledError:
+                        task = asyncio.current_task()
+                        if task is not None and task.cancelling():
+                            raise
+                    except Exception:
+                        pass
                     await active.close()
 
                 self._active = _ActiveSession(handle, close_started_session)
