@@ -76,3 +76,24 @@ async def test_reconnect_closes_previous_session_and_stale_clear_is_ignored() ->
 
     assert closed == ["first"]
     assert await coordinator.active() == second
+
+
+async def test_reconnect_starts_replacement_when_previous_cleanup_fails() -> None:
+    coordinator = LiveSessionCoordinator()
+    first = SessionHandle("first", 1)
+    second = SessionHandle("second", 1)
+    close_attempts = 0
+
+    async def fail_close() -> None:
+        nonlocal close_attempts
+        close_attempts += 1
+        raise RuntimeError("previous cleanup failed")
+
+    async def close_second() -> None:
+        return
+
+    assert await coordinator.replace(first, fail_close)
+    assert not await coordinator.replace(second, close_second)
+
+    assert close_attempts == 1
+    assert await coordinator.active() == second

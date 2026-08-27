@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Awaitable, Callable
 from typing import Any
 from uuid import uuid4
 
@@ -32,6 +33,35 @@ from kassette.sessions import (
 _registry = SessionRegistry()
 _lifecycle = LiveSessionCoordinator()
 _diagnostics = LifecycleDiagnostics()
+
+
+class _SessionCloser:
+    def __init__(
+        self,
+        cancel_worker: Callable[[], Awaitable[None]],
+        close_provider: Callable[[], Awaitable[None]],
+    ) -> None:
+        self._cancel_worker = cancel_worker
+        self._close_provider = close_provider
+        self._lock = asyncio.Lock()
+        self._stopped = False
+
+    async def __call__(self) -> None:
+        async with self._lock:
+            if self._stopped:
+                return
+            self._stopped = True
+            failure: BaseException | None = None
+            try:
+                await self._cancel_worker()
+            except BaseException as error:
+                failure = error
+            try:
+                await self._close_provider()
+            except BaseException as error:
+                failure = failure or error
+            if failure is not None:
+                raise failure
 
 
 async def _log_event(event: SessionEvent) -> None:
@@ -70,26 +100,10 @@ async def run_session(
 
     runner = WorkerRunner(handle_sigint=False)
     await runner.add_workers(worker)
-    close_lock = asyncio.Lock()
-    stopped = False
-
-    async def close_session() -> None:
-        nonlocal stopped
-        async with close_lock:
-            if stopped:
-                return
-            failure: BaseException | None = None
-            try:
-                await worker.cancel()
-            except BaseException as error:
-                failure = error
-            try:
-                await service._close()  # pyright: ignore[reportPrivateUsage]
-            except BaseException as error:
-                failure = failure or error
-            if failure is not None:
-                raise failure
-            stopped = True
+    close_session = _SessionCloser(
+        worker.cancel,
+        service._close,  # pyright: ignore[reportPrivateUsage]
+    )
 
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(_transport: BaseTransport, _client: Any) -> None:
@@ -98,10 +112,12 @@ async def run_session(
 
     handle = SessionHandle(session_id, snapshot.generation)
     try:
-        await lifecycle.replace(
+        previous_closed = await lifecycle.replace(
             handle=handle,
             close=close_session,
         )
+        if not previous_closed:
+            logger.warning("kassette previous voice session cleanup failed during replacement")
         await runner.run()
     finally:
         try:

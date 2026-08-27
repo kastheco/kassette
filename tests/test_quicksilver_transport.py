@@ -9,10 +9,12 @@ from aiortc.mediastreams import MediaStreamError
 from pytest import MonkeyPatch
 
 from kassette.credentials import CodexCredentials
+from kassette.domain import AudioChunk
 from kassette.providers.quicksilver.protocol import ProviderEvent
 from kassette.providers.quicksilver.transport import (
     QuicksilverTransport,
     QuicksilverTransportError,
+    _InputAudioTrack,  # pyright: ignore[reportPrivateUsage]
 )
 
 
@@ -204,6 +206,19 @@ async def test_signaling_answer_is_size_bounded(monkeypatch: MonkeyPatch) -> Non
 
     with pytest.raises(QuicksilverTransportError, match="response is too large"):
         await transport.open()
+
+
+async def test_input_audio_track_enforces_chunk_size_bound() -> None:
+    track = _InputAudioTrack()
+    accepted = AudioChunk(audio=b"\x00" * 65_536, sample_rate=16_000, num_channels=1)
+
+    track.write(accepted)
+    with pytest.raises(QuicksilverTransportError, match="audio chunk is too large"):
+        track.write(AudioChunk(audio=b"\x00" * 65_538, sample_rate=16_000, num_channels=1))
+
+    frame = await track.recv()
+    assert frame.samples == 32_768
+    await track.close()
 
 
 async def _open_connected_transport(

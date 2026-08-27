@@ -6,9 +6,9 @@ Observed on the committed KAS-731 lane head on 2026-08-27:
 
 ```bash
 uv sync --locked                   # resolved 104; checked 102 packages
-uv run pytest                      # 41 passed
+uv run pytest                      # 44 passed
 uv run ruff check .              # passed
-uv run ruff format --check .     # 22 files already formatted
+uv run ruff format --check .     # 23 files already formatted
 uv run pyright                   # 0 errors, 0 warnings, 0 informations
 ```
 

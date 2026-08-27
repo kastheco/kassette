@@ -52,12 +52,18 @@ class LiveSessionCoordinator:
         self._lock = asyncio.Lock()
         self._active: _ActiveSession | None = None
 
-    async def replace(self, handle: SessionHandle, close: CloseSession) -> None:
+    async def replace(self, handle: SessionHandle, close: CloseSession) -> bool:
         async with self._lock:
             previous = self._active
             self._active = _ActiveSession(handle, close)
         if previous is not None and previous.handle != handle:
-            await previous.close()
+            try:
+                await previous.close()
+            except BaseException:
+                # The replacement already owns the loop. A stale session's cleanup
+                # failure must not prevent the new client from starting.
+                return False
+        return True
 
     async def clear(self, handle: SessionHandle) -> None:
         async with self._lock:
