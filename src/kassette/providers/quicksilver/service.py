@@ -262,6 +262,7 @@ class GPTLiveService(FrameProcessor):
 
     async def _fail(self, error_code: str, *, message: str) -> None:
         try:
+            previous = await self._registry.get(self._session_id)
             snapshot = await self._registry.transition(
                 self._session_id,
                 SessionState.FAILED,
@@ -271,13 +272,14 @@ class GPTLiveService(FrameProcessor):
             return
         finally:
             await self._registry.release_audio(self._session_id)
-        await self._event_sink(
-            SessionEvent(
-                session_id=self._session_id,
-                type=SessionEventType.SESSION_STATE_CHANGED,
-                state=snapshot.state,
+        if previous.state is not snapshot.state:
+            await self._event_sink(
+                SessionEvent(
+                    session_id=self._session_id,
+                    type=SessionEventType.SESSION_STATE_CHANGED,
+                    state=snapshot.state,
+                )
             )
-        )
         await self._event_sink(
             SessionEvent(
                 session_id=self._session_id,

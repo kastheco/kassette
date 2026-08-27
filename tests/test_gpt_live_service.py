@@ -254,3 +254,53 @@ async def test_provider_open_failure_emits_normalized_failure_event() -> None:
             metadata={"message": "provider connection failed"},
         ),
     ]
+
+
+async def test_repeated_provider_errors_emit_one_failed_state_change() -> None:
+    registry = SessionRegistry()
+    await registry.create("voice-1")
+    events: list[SessionEvent] = []
+    transports: list[FakeTransport] = []
+
+    async def collect(event: SessionEvent) -> None:
+        events.append(event)
+
+    def create_transport(**kwargs: Any) -> FakeTransport:
+        transport = FakeTransport(**kwargs)
+        transports.append(transport)
+        return transport
+
+    service = GPTLiveService(
+        session_id="voice-1",
+        registry=registry,
+        credentials=FakeCredentials(),
+        event_sink=collect,
+        transport_factory=create_transport,
+    )
+    await service._start_session()  # pyright: ignore[reportPrivateUsage]
+    events.clear()
+
+    await transports[0].event_sink(ProviderEvent(type="error", message="boom one"))
+    await transports[0].event_sink(ProviderEvent(type="error", message="boom two"))
+
+    assert events == [
+        SessionEvent(
+            session_id="voice-1",
+            type=SessionEventType.SESSION_STATE_CHANGED,
+            state=SessionState.FAILED,
+        ),
+        SessionEvent(
+            session_id="voice-1",
+            type=SessionEventType.ERROR,
+            state=SessionState.FAILED,
+            error_code="provider_error",
+            metadata={"message": "boom one"},
+        ),
+        SessionEvent(
+            session_id="voice-1",
+            type=SessionEventType.ERROR,
+            state=SessionState.FAILED,
+            error_code="provider_error",
+            metadata={"message": "boom two"},
+        ),
+    ]
