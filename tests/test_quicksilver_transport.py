@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from typing import Any, ClassVar
 
 import pytest
+from aiortc.mediastreams import MediaStreamError
 from pytest import MonkeyPatch
 
 from kassette.credentials import CodexCredentials
+from kassette.providers.quicksilver.protocol import ProviderEvent
 from kassette.providers.quicksilver.transport import (
     QuicksilverTransport,
     QuicksilverTransportError,
@@ -32,8 +35,12 @@ class FakeChannel:
 
 
 class FakePeer:
+    latest: FakePeer | None = None
+
     def __init__(self) -> None:
+        type(self).latest = self
         self.connectionState = "new"
+        self.handlers: dict[str, Callable[..., Any]] = {}
 
     def addTrack(self, _track: object) -> None:
         return
@@ -46,6 +53,7 @@ class FakePeer:
 
     def on(self, _event: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         def register(callback: Callable[..., Any]) -> Callable[..., Any]:
+            self.handlers[_event] = callback
             return callback
 
         return register
@@ -55,6 +63,38 @@ class FakePeer:
 
     async def close(self) -> None:
         return
+
+    def emit(self, event: str, *args: object) -> None:
+        self.handlers[event](*args)
+
+
+class EndedAudioTrack:
+    kind = "audio"
+
+    async def recv(self) -> None:
+        raise MediaStreamError
+
+
+class HangingSideband:
+    closed = False
+
+    def __aiter__(self) -> HangingSideband:
+        return self
+
+    async def __anext__(self) -> Any:
+        await asyncio.Future[None]()
+        raise StopAsyncIteration
+
+    async def send_json(self, _message: object) -> None:
+        return
+
+    async def close(self, **_kwargs: object) -> None:
+        self.closed = True
+
+
+class EndedSideband(HangingSideband):
+    async def __anext__(self) -> Any:
+        raise StopAsyncIteration
 
 
 class FakeResponse:
@@ -164,3 +204,103 @@ async def test_signaling_answer_is_size_bounded(monkeypatch: MonkeyPatch) -> Non
 
     with pytest.raises(QuicksilverTransportError, match="response is too large"):
         await transport.open()
+
+
+async def _open_connected_transport(
+    monkeypatch: MonkeyPatch,
+    events: list[ProviderEvent],
+    sideband_type: type[HangingSideband] = HangingSideband,
+) -> tuple[QuicksilverTransport, FakePeer]:
+    from kassette.providers.quicksilver import transport as module
+
+    async def collect(event: ProviderEvent) -> None:
+        events.append(event)
+
+    async def connect_sideband(
+        _self: QuicksilverTransport,
+        _call_id: str,
+        _headers: dict[str, str],
+    ) -> Any:
+        return sideband_type()
+
+    async def wait_for_peer(peer: FakePeer) -> None:
+        peer.connectionState = "connected"
+
+    monkeypatch.setattr(module, "RTCPeerConnection", FakePeer)
+    monkeypatch.setattr(module.aiohttp, "ClientSession", OversizedHTTP)
+    monkeypatch.setattr(module.RTCRtpSender, "getCapabilities", _capabilities)
+    monkeypatch.setattr(QuicksilverTransport, "_connect_sideband", connect_sideband)
+    monkeypatch.setattr(QuicksilverTransport, "_wait_for_peer", staticmethod(wait_for_peer))
+
+    class AnswerContent:
+        async def read(self, _limit: int) -> bytes:
+            return b"answer-sdp"
+
+    class AnswerResponse(OversizedResponse):
+        content = AnswerContent()
+
+    class AnswerHTTP(OversizedHTTP):
+        def post(self, _url: str, **_kwargs: object) -> AnswerResponse:
+            return AnswerResponse()
+
+    async def set_description(_self: FakePeer, _description: object) -> None:
+        return
+
+    monkeypatch.setattr(module.aiohttp, "ClientSession", AnswerHTTP)
+    monkeypatch.setattr(FakePeer, "setLocalDescription", set_description, raising=False)
+    monkeypatch.setattr(FakePeer, "setRemoteDescription", set_description, raising=False)
+
+    transport = QuicksilverTransport(
+        session_id="voice-1",
+        credentials=FakeCredentials(),
+        instructions="instructions-secret",
+        voice="sol",
+        event_sink=collect,
+        audio_sink=_discard,
+    )
+    await transport.open()
+    assert FakePeer.latest is not None
+    return transport, FakePeer.latest
+
+
+async def test_established_peer_disconnect_emits_one_terminal_error(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    events: list[ProviderEvent] = []
+    transport, peer = await _open_connected_transport(monkeypatch, events)
+
+    peer.connectionState = "failed"
+    peer.emit("connectionstatechange")
+    peer.emit("connectionstatechange")
+    await asyncio.sleep(0)
+
+    assert len(events) == 1
+    assert events[0].type == "error"
+    await transport.close()
+
+
+async def test_established_media_disconnect_emits_terminal_error(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    events: list[ProviderEvent] = []
+    transport, peer = await _open_connected_transport(monkeypatch, events)
+
+    peer.emit("track", EndedAudioTrack())
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert len(events) == 1
+    assert events[0].type == "error"
+    await transport.close()
+
+
+async def test_established_sideband_disconnect_emits_terminal_error(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    events: list[ProviderEvent] = []
+    transport, _peer = await _open_connected_transport(monkeypatch, events, EndedSideband)
+    await asyncio.sleep(0)
+
+    assert len(events) == 1
+    assert events[0].type == "error"
+    await transport.close()

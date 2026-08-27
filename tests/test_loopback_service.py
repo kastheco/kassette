@@ -21,47 +21,62 @@ def _free_port() -> int:
         return int(listener.getsockname()[1])
 
 
+def _wait_for_client(process: subprocess.Popen[str], url: str) -> str:
+    deadline = time.monotonic() + 10
+    while True:
+        try:
+            with urlopen(url, timeout=1) as response:
+                return response.read().decode()
+        except URLError:
+            if process.poll() is not None or time.monotonic() >= deadline:
+                output = process.stdout.read() if process.stdout is not None else ""
+                raise AssertionError(f"loopback service did not start: {output}") from None
+            time.sleep(0.05)
+
+
 def test_executable_loopback_service_serves_client() -> None:
     port = _free_port()
+    command = [
+        sys.executable,
+        "-m",
+        "kassette.bot",
+        "-t",
+        "webrtc",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(port),
+        "--allowed-origins",
+        f"http://127.0.0.1:{port}",
+    ]
     process = subprocess.Popen(
-        [
-            sys.executable,
-            "-m",
-            "kassette.bot",
-            "-t",
-            "webrtc",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            str(port),
-            "--allowed-origins",
-            f"http://127.0.0.1:{port}",
-        ],
+        command,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
     )
     try:
-        deadline = time.monotonic() + 10
-        while True:
-            try:
-                with urlopen(f"http://127.0.0.1:{port}/client/", timeout=1) as response:
-                    html = response.read().decode()
-                break
-            except URLError:
-                if process.poll() is not None or time.monotonic() >= deadline:
-                    output = process.stdout.read() if process.stdout is not None else ""
-                    raise AssertionError(f"loopback service did not start: {output}") from None
-                time.sleep(0.05)
-
+        client_url = f"http://127.0.0.1:{port}/client/"
+        html = _wait_for_client(process, client_url)
         assert process.poll() is None
         assert "pipecat" in html.lower()
         with urlopen(f"http://127.0.0.1:{port}/openapi.json", timeout=1) as response:
             openapi = response.read().decode()
         assert '"/api/offer"' in openapi
-    finally:
+
         process.terminate()
         process.wait(timeout=10)
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        assert "pipecat" in _wait_for_client(process, client_url).lower()
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            process.wait(timeout=10)
 
 
 async def _connect_peer(base_url: str) -> RTCPeerConnection:

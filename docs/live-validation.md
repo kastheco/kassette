@@ -6,7 +6,7 @@ Observed on the committed KAS-731 lane head on 2026-08-27:
 
 ```bash
 uv sync --locked                   # resolved 104; checked 102 packages
-uv run pytest                      # 38 passed
+uv run pytest                      # 41 passed
 uv run ruff check .              # passed
 uv run ruff format --check .     # 22 files already formatted
 uv run pyright                   # 0 errors, 0 warnings, 0 informations
@@ -20,13 +20,15 @@ curl -L http://127.0.0.1:7860/client
 ```
 
 The automated suite starts the executable Pipecat runner on an ephemeral loopback port,
-loads `/client/`, and verifies `/api/offer` is exposed. A second executable test connects
+loads `/client/`, verifies `/api/offer` is exposed, stops it, and restarts it on the same
+port. A second executable test connects
 two real aiortc peers to the runner in sequence using a content-free synthetic provider.
 It verifies that reconnect creates a fresh session ID, closes and reaps the prior session,
 transfers the single audio lease, propagates peer disconnect, closes the provider once,
 and leaves no registered session or lease behind.
 
-Focused behavior tests additionally cover provider-open and provider-event failure cleanup,
+Focused behavior tests additionally cover first-input timing, established provider peer/media
+disconnect propagation, provider-open and provider-event failure cleanup,
 failed interruption recovery, idempotent terminal cleanup, generation-fenced stale callbacks
 and lease release, bounded provider parsing, sanitized fixtures, and content-free structured
 lifecycle timing records. The fixtures prove credentials, auth and SDP material, raw audio,

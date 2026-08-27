@@ -99,6 +99,7 @@ class GPTLiveService(FrameProcessor):
         self._close_lock = asyncio.Lock()
         self._interrupt_lock = asyncio.Lock()
         self._closed = False
+        self._received_input = False
         self._speaking = False
 
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
@@ -109,6 +110,14 @@ class GPTLiveService(FrameProcessor):
         elif isinstance(frame, InputAudioRawFrame):
             if self._closed or not await self._is_current():
                 return
+            if not self._received_input:
+                self._received_input = True
+                await self._event_sink(
+                    SessionEvent(
+                        session_id=self._session_id,
+                        type=SessionEventType.INPUT_AUDIO_STARTED,
+                    )
+                )
             await self._transport.send_audio(
                 AudioChunk(
                     audio=frame.audio,

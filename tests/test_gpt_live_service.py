@@ -109,7 +109,11 @@ async def test_fake_native_provider_completes_session_lifecycle() -> None:
 async def test_pipecat_and_quicksilver_exchange_audio_in_process() -> None:
     registry = SessionRegistry()
     await registry.create("voice-1")
+    events: list[SessionEvent] = []
     transports: list[FakeTransport] = []
+
+    async def collect(event: SessionEvent) -> None:
+        events.append(event)
 
     def create_transport(**kwargs: Any) -> FakeTransport:
         transport = FakeTransport(**kwargs)
@@ -120,6 +124,7 @@ async def test_pipecat_and_quicksilver_exchange_audio_in_process() -> None:
         session_id="voice-1",
         registry=registry,
         credentials=FakeCredentials(),
+        event_sink=collect,
         transport_factory=create_transport,
     )
     await service._start_session()  # pyright: ignore[reportPrivateUsage]
@@ -129,6 +134,13 @@ async def test_pipecat_and_quicksilver_exchange_audio_in_process() -> None:
     assert transports[0].sent_audio == [
         AudioChunk(audio=client_audio.audio, sample_rate=16_000, num_channels=1)
     ]
+
+    await service.process_frame(client_audio, FrameDirection.DOWNSTREAM)
+    assert transports[0].sent_audio == [
+        AudioChunk(audio=client_audio.audio, sample_rate=16_000, num_channels=1),
+        AudioChunk(audio=client_audio.audio, sample_rate=16_000, num_channels=1),
+    ]
+    assert [event.type for event in events].count(SessionEventType.INPUT_AUDIO_STARTED) == 1
 
     provider_audio = AudioChunk(audio=b"\x03\x00\x04\x00", sample_rate=24_000, num_channels=1)
     await transports[0].audio_sink(provider_audio)
