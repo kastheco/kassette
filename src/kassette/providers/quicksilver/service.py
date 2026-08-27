@@ -33,7 +33,7 @@ from kassette.providers.quicksilver.protocol import (
     build_delegation_unavailable,
 )
 from kassette.providers.quicksilver.transport import QuicksilverTransport
-from kassette.sessions import SessionRegistry, SessionRegistryError
+from kassette.sessions import SessionNotFoundError, SessionRegistry, SessionRegistryError
 
 DIRECT_VOICE_INSTRUCTIONS = """You are kassette, a direct realtime voice assistant.
 
@@ -76,6 +76,7 @@ class GPTLiveService(FrameProcessor):
         event_sink: EventSink | None = None,
         voice: LiveVoice = DEFAULT_LIVE_VOICE,
         transport_factory: TransportFactory = QuicksilverTransport,
+        generation: int = 1,
         name: str | None = None,
         enable_direct_mode: bool = False,
     ) -> None:
@@ -84,6 +85,7 @@ class GPTLiveService(FrameProcessor):
             enable_direct_mode=enable_direct_mode,
         )
         self._session_id = session_id
+        self._generation = generation
         self._registry = registry
         self._event_sink = event_sink or _discard_event
         self._transport = transport_factory(
@@ -95,7 +97,10 @@ class GPTLiveService(FrameProcessor):
             audio_sink=self._handle_provider_audio,
         )
         self._close_lock = asyncio.Lock()
+        self._cleanup_task: asyncio.Task[None] | None = None
+        self._interrupt_lock = asyncio.Lock()
         self._closed = False
+        self._received_input = False
         self._speaking = False
 
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
@@ -104,6 +109,16 @@ class GPTLiveService(FrameProcessor):
         if isinstance(frame, StartFrame):
             await self._start_session()
         elif isinstance(frame, InputAudioRawFrame):
+            if self._closed or not await self._is_current():
+                return
+            if not self._received_input:
+                self._received_input = True
+                await self._event_sink(
+                    SessionEvent(
+                        session_id=self._session_id,
+                        type=SessionEventType.INPUT_AUDIO_STARTED,
+                    )
+                )
             await self._transport.send_audio(
                 AudioChunk(
                     audio=frame.audio,
@@ -119,9 +134,12 @@ class GPTLiveService(FrameProcessor):
         await self.push_frame(frame, direction)
 
     async def _start_session(self) -> None:
-        await self._registry.acquire_audio(self._session_id)
-        await self._transition(SessionState.CONNECTING)
+        await self._registry.acquire_audio(
+            self._session_id,
+            expected_generation=self._generation,
+        )
         try:
+            await self._transition(SessionState.CONNECTING)
             await self._transport.open()
         except BaseException:
             await self._fail(
@@ -131,40 +149,66 @@ class GPTLiveService(FrameProcessor):
             raise
 
     async def _interrupt(self) -> None:
-        snapshot = await self._registry.get(self._session_id)
-        if snapshot.state in {SessionState.LISTENING, SessionState.SPEAKING}:
+        async with self._interrupt_lock:
+            if self._closed or not await self._is_current():
+                return
+            snapshot = await self._registry.get(self._session_id)
+            if snapshot.state not in {SessionState.LISTENING, SessionState.SPEAKING}:
+                return
             await self._transition(SessionState.INTERRUPTING)
-        await self._transport.interrupt()
-        self._speaking = False
-        await self._event_sink(
-            SessionEvent(
-                session_id=self._session_id,
-                type=SessionEventType.INTERRUPTED,
-                state=SessionState.INTERRUPTING,
-            )
-        )
-        snapshot = await self._registry.get(self._session_id)
-        if snapshot.state is SessionState.INTERRUPTING:
-            await self._transition(SessionState.LISTENING)
+            self._speaking = False
+            try:
+                await self._transport.interrupt()
+            except BaseException:
+                snapshot = await self._registry.get(self._session_id)
+                if snapshot.state is SessionState.INTERRUPTING:
+                    await self._transition(SessionState.LISTENING)
+                raise
+            try:
+                await self._event_sink(
+                    SessionEvent(
+                        session_id=self._session_id,
+                        type=SessionEventType.INTERRUPTED,
+                        state=SessionState.INTERRUPTING,
+                    )
+                )
+            finally:
+                snapshot = await self._registry.get(self._session_id)
+                if snapshot.state is SessionState.INTERRUPTING:
+                    await self._transition(SessionState.LISTENING)
 
     async def _close(self) -> None:
         async with self._close_lock:
-            if self._closed:
-                return
-            self._closed = True
-            snapshot = await self._registry.get(self._session_id)
-            if snapshot.state not in {SessionState.CLOSED, SessionState.FAILED}:
-                await self._transition(SessionState.CLOSING)
+            if self._cleanup_task is None:
+                self._closed = True
+                self._cleanup_task = asyncio.create_task(self._close_session())
+            task = self._cleanup_task
+        await asyncio.shield(task)
+
+    async def _close_session(self) -> None:
+        current = await self._is_current()
+        try:
+            if current:
+                snapshot = await self._registry.get(self._session_id)
+                if snapshot.state not in {SessionState.CLOSED, SessionState.FAILED}:
+                    await self._transition(SessionState.CLOSING)
+        finally:
             try:
                 await self._transport.close()
             finally:
-                snapshot = await self._registry.get(self._session_id)
-                if snapshot.state is SessionState.CLOSING:
-                    await self._transition(SessionState.CLOSED)
-                await self._registry.release_audio(self._session_id)
+                try:
+                    if current and await self._is_current():
+                        snapshot = await self._registry.get(self._session_id)
+                        if snapshot.state is SessionState.CLOSING:
+                            await self._transition(SessionState.CLOSED)
+                finally:
+                    await self._registry.release_audio(
+                        self._session_id,
+                        expected_generation=self._generation,
+                    )
 
     async def _handle_provider_audio(self, chunk: AudioChunk) -> None:
-        if self._closed:
+        if self._closed or not await self._is_current():
             return
         if not self._speaking:
             self._speaking = True
@@ -185,7 +229,7 @@ class GPTLiveService(FrameProcessor):
         )
 
     async def _handle_provider_event(self, event: ProviderEvent) -> None:
-        if self._closed:
+        if self._closed or not await self._is_current():
             return
         if event.type == "session.started":
             await self._transition(SessionState.LISTENING, provider_session_id=event.session_id)
@@ -239,7 +283,7 @@ class GPTLiveService(FrameProcessor):
             )
             return
         if event.type == "error":
-            await self._fail("provider_error", message=event.message or "provider error")
+            await self._fail("provider_error", message="provider error")
 
     async def _transition(
         self,
@@ -251,6 +295,7 @@ class GPTLiveService(FrameProcessor):
             self._session_id,
             state,
             provider_session_id=provider_session_id,
+            expected_generation=self._generation,
         )
         await self._event_sink(
             SessionEvent(
@@ -261,6 +306,16 @@ class GPTLiveService(FrameProcessor):
         )
 
     async def _fail(self, error_code: str, *, message: str) -> None:
+        async with self._close_lock:
+            if self._cleanup_task is None:
+                self._closed = True
+                self._cleanup_task = asyncio.create_task(
+                    self._fail_session(error_code, message=message)
+                )
+            task = self._cleanup_task
+        await asyncio.shield(task)
+
+    async def _fail_session(self, error_code: str, *, message: str) -> None:
         previous = None
         snapshot = None
         try:
@@ -269,28 +324,48 @@ class GPTLiveService(FrameProcessor):
                 self._session_id,
                 SessionState.FAILED,
                 error_code=error_code,
+                expected_generation=self._generation,
             )
         except SessionRegistryError:
             pass
         finally:
-            await self._registry.release_audio(self._session_id)
-        if previous is not None and snapshot is not None and previous.state is not snapshot.state:
+            await self._registry.release_audio(
+                self._session_id,
+                expected_generation=self._generation,
+            )
+        try:
+            if (
+                previous is not None
+                and snapshot is not None
+                and previous.state is not snapshot.state
+            ):
+                await self._event_sink(
+                    SessionEvent(
+                        session_id=self._session_id,
+                        type=SessionEventType.SESSION_STATE_CHANGED,
+                        state=snapshot.state,
+                    )
+                )
             await self._event_sink(
                 SessionEvent(
                     session_id=self._session_id,
-                    type=SessionEventType.SESSION_STATE_CHANGED,
-                    state=snapshot.state,
+                    type=SessionEventType.ERROR,
+                    state=SessionState.FAILED,
+                    error_code=error_code,
+                    metadata={"message": message},
                 )
             )
-        await self._event_sink(
-            SessionEvent(
-                session_id=self._session_id,
-                type=SessionEventType.ERROR,
-                state=SessionState.FAILED,
-                error_code=error_code,
-                metadata={"message": message},
-            )
-        )
+        finally:
+            await self._transport.close()
+
+    async def _is_current(self) -> bool:
+        try:
+            snapshot = await self._registry.get(self._session_id)
+        except SessionNotFoundError:
+            return False
+        if snapshot.generation != self._generation:
+            return False
+        return True
 
 
 def _role(event: ProviderEvent) -> TranscriptRole | None:

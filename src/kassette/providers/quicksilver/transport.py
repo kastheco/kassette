@@ -40,6 +40,9 @@ from kassette.providers.quicksilver.protocol import (
 ProviderEventSink = Callable[[ProviderEvent], Awaitable[None]]
 ProviderAudioSink = Callable[[AudioChunk], Awaitable[None]]
 
+_MAX_SIGNALING_BODY_BYTES = 262_144
+_MAX_INPUT_AUDIO_BYTES = 65_536
+
 
 class QuicksilverTransportError(RuntimeError):
     code = "quicksilver_transport_error"
@@ -86,6 +89,8 @@ class _InputAudioTrack(MediaStreamTrack):
     def write(self, chunk: AudioChunk) -> None:
         if self.readyState == "ended":
             return
+        if len(chunk.audio) > _MAX_INPUT_AUDIO_BYTES:
+            raise QuicksilverTransportError("Quicksilver input audio chunk is too large")
         try:
             self._queue.put_nowait(chunk)
         except asyncio.QueueFull as error:
@@ -128,6 +133,8 @@ class QuicksilverTransport:
         self._event_tasks: set[asyncio.Future[None]] = set()
         self._connected = False
         self._closed = False
+        self._close_task: asyncio.Task[None] | None = None
+        self._disconnect_reported = False
 
     async def open(self) -> None:
         if self._closed:
@@ -167,21 +174,29 @@ class QuicksilverTransport:
                     "session": build_session_payload(self._instructions, self._voice),
                 },
             ) as response:
-                answer = await response.text()
                 if not response.ok:
-                    detail = " ".join(answer.strip().split())[:2_048]
-                    suffix = f": {detail}" if detail else ""
                     raise QuicksilverTransportError(
-                        f"Quicksilver signaling failed with HTTP {response.status}{suffix}"
+                        f"Quicksilver signaling failed with HTTP {response.status}"
                     )
+                answer_bytes = await response.content.read(_MAX_SIGNALING_BODY_BYTES + 1)
+                if len(answer_bytes) > _MAX_SIGNALING_BODY_BYTES:
+                    raise QuicksilverTransportError("Quicksilver signaling response is too large")
+                try:
+                    answer = answer_bytes.decode("utf-8")
+                except UnicodeDecodeError as error:
+                    raise QuicksilverTransportError(
+                        "Quicksilver signaling returned invalid SDP"
+                    ) from error
                 call_id = parse_call_id(response.headers.get("location"))
                 if not call_id:
                     raise QuicksilverTransportError("Quicksilver signaling returned no call ID")
             await peer.setLocalDescription(offer)
             await peer.setRemoteDescription(RTCSessionDescription(sdp=answer, type="answer"))
             await self._wait_for_peer(peer)
-            await self._connect_sideband(call_id, headers)
+            sideband = await self._connect_sideband(call_id, headers)
+            self._sideband = sideband
             self._connected = True
+            self._sideband_task = asyncio.create_task(self._read_sideband(sideband))
         except BaseException:
             await self.close()
             raise
@@ -200,39 +215,50 @@ class QuicksilverTransport:
         """Input audio drives provider-side barge-in; no separate wire command is known."""
 
     async def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        self._connected = False
+        if self._close_task is None:
+            self._closed = True
+            self._connected = False
+            self._close_task = asyncio.create_task(self._close())
+        await asyncio.shield(self._close_task)
+
+    async def _close(self) -> None:
         sideband = self._sideband
         self._sideband = None
         if sideband is not None and not sideband.closed:
-            with contextlib.suppress(Exception):
+            with contextlib.suppress(Exception, asyncio.CancelledError):
                 await sideband.send_json(build_session_close())
-            await sideband.close(code=1000, message=b"done")
+            with contextlib.suppress(Exception, asyncio.CancelledError):
+                await sideband.close(code=1000, message=b"done")
         if self._sideband_task is not None:
-            self._sideband_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._sideband_task
+            sideband_task = self._sideband_task
+            if sideband_task is not asyncio.current_task():
+                sideband_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await sideband_task
             self._sideband_task = None
         for task in tuple(self._remote_audio_tasks):
             task.cancel()
         if self._remote_audio_tasks:
             await asyncio.gather(*self._remote_audio_tasks, return_exceptions=True)
         self._remote_audio_tasks.clear()
-        for task in tuple(self._event_tasks):
+        current = asyncio.current_task()
+        pending_events = {task for task in self._event_tasks if task is not current}
+        for task in pending_events:
             task.cancel()
-        if self._event_tasks:
-            await asyncio.gather(*self._event_tasks, return_exceptions=True)
+        if pending_events:
+            await asyncio.gather(*pending_events, return_exceptions=True)
         self._event_tasks.clear()
         if self._input_track is not None:
-            await self._input_track.close()
+            with contextlib.suppress(Exception, asyncio.CancelledError):
+                await self._input_track.close()
             self._input_track = None
         if self._peer is not None:
-            await self._peer.close()
+            with contextlib.suppress(Exception, asyncio.CancelledError):
+                await self._peer.close()
             self._peer = None
         if self._http is not None:
-            await self._http.close()
+            with contextlib.suppress(Exception, asyncio.CancelledError):
+                await self._http.close()
             self._http = None
 
     def _install_peer_handlers(self, peer: RTCPeerConnection, channel: RTCDataChannel) -> None:
@@ -242,9 +268,7 @@ class QuicksilverTransport:
                 return
             event = parse_provider_event(message)
             if event is not None:
-                task = asyncio.ensure_future(self._event_sink(event))
-                self._event_tasks.add(task)
-                task.add_done_callback(self._event_tasks.discard)
+                self._spawn_event(self._event_sink(event))
 
         @peer.on("track")
         def on_track(track: MediaStreamTrack) -> None:
@@ -252,7 +276,18 @@ class QuicksilverTransport:
                 return
             task = asyncio.create_task(self._read_remote_audio(track))
             self._remote_audio_tasks.add(task)
-            task.add_done_callback(self._remote_audio_tasks.discard)
+
+            def finish(completed: asyncio.Task[None]) -> None:
+                self._remote_audio_tasks.discard(completed)
+                if not completed.cancelled():
+                    completed.exception()
+
+            task.add_done_callback(finish)
+
+        @peer.on("connectionstatechange")
+        def on_connection_state_change() -> None:
+            if self._connected and peer.connectionState in {"disconnected", "failed", "closed"}:
+                self._spawn_event(self._report_disconnect())
 
     async def _read_remote_audio(self, track: MediaStreamTrack) -> None:
         resampler = AudioResampler(format="s16", layout="mono", rate=24_000)
@@ -268,10 +303,31 @@ class QuicksilverTransport:
                         await self._audio_sink(
                             AudioChunk(audio=audio, sample_rate=24_000, num_channels=1)
                         )
-        except (MediaStreamError, asyncio.CancelledError):
+        except asyncio.CancelledError:
             return
+        except MediaStreamError:
+            await self._report_disconnect()
 
-    async def _connect_sideband(self, call_id: str, headers: dict[str, str]) -> None:
+    def _spawn_event(self, awaitable: Awaitable[None]) -> None:
+        task = asyncio.ensure_future(awaitable)
+        self._event_tasks.add(task)
+
+        def finish(completed: asyncio.Future[None]) -> None:
+            self._event_tasks.discard(completed)
+            if not completed.cancelled():
+                completed.exception()
+
+        task.add_done_callback(finish)
+
+    async def _report_disconnect(self) -> None:
+        if self._closed or self._disconnect_reported:
+            return
+        self._disconnect_reported = True
+        await self._event_sink(ProviderEvent(type="error", message="provider disconnected"))
+
+    async def _connect_sideband(
+        self, call_id: str, headers: dict[str, str]
+    ) -> aiohttp.ClientWebSocketResponse:
         if self._http is None:
             raise QuicksilverTransportError("HTTP session is unavailable")
         failure: Exception = QuicksilverTransportError("sideband connection failed")
@@ -280,10 +336,10 @@ class QuicksilverTransport:
                 sideband = await self._http.ws_connect(
                     sideband_url(call_id),
                     headers=headers,
+                    max_msg_size=_MAX_SIGNALING_BODY_BYTES,
                 )
                 self._sideband = sideband
-                self._sideband_task = asyncio.create_task(self._read_sideband(sideband))
-                return
+                return sideband
             except (aiohttp.ClientError, TimeoutError) as error:
                 failure = error
                 if attempt < 4:
@@ -298,10 +354,7 @@ class QuicksilverTransport:
                     await self._event_sink(event)
             elif message.type in {aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSED}:
                 break
-        if not self._closed:
-            await self._event_sink(
-                ProviderEvent(type="error", message="Quicksilver sideband disconnected")
-            )
+        await self._report_disconnect()
 
     @staticmethod
     async def _wait_for_ice(peer: RTCPeerConnection) -> None:

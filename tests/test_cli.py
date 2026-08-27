@@ -47,3 +47,18 @@ def test_call_opens_local_client(monkeypatch: MonkeyPatch) -> None:
 
     assert result.exit_code == 0
     assert opened == ["http://127.0.0.1:7860/client"]
+
+
+def test_ipv6_loopback_urls_are_bracketed(monkeypatch: MonkeyPatch) -> None:
+    opened: list[str] = []
+
+    def fake_open(url: str) -> bool:
+        opened.append(url)
+        return True
+
+    monkeypatch.setattr(webbrowser, "open", fake_open)
+
+    result = runner.invoke(app, ["call", "--host", "::1"])
+
+    assert result.exit_code == 0
+    assert opened == ["http://[::1]:7860/client"]

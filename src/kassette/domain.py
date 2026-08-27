@@ -25,6 +25,7 @@ TERMINAL_SESSION_STATES = frozenset({SessionState.CLOSED, SessionState.FAILED})
 class SessionEventType(StrEnum):
     SESSION_CREATED = "session.created"
     SESSION_STATE_CHANGED = "session.state_changed"
+    INPUT_AUDIO_STARTED = "input.audio_started"
     TRANSCRIPT_DELTA = "transcript.delta"
     TRANSCRIPT_FINAL = "transcript.final"
     SPEECH_STARTED = "speech.started"
@@ -77,6 +78,7 @@ class SessionEvent:
 class VoiceSessionSnapshot:
     id: str
     state: SessionState
+    generation: int = 1
     provider_session_id: str | None = None
     error_code: str | None = None
 

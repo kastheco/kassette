@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -34,6 +35,7 @@ class FakeTransport:
         self.interrupted = False
         self.closed = False
         self.open_error: Exception | None = None
+        self.interrupt_error: Exception | None = None
 
     async def open(self) -> None:
         if self.open_error is not None:
@@ -47,6 +49,8 @@ class FakeTransport:
         self.sent_messages.append(message)
 
     async def interrupt(self) -> None:
+        if self.interrupt_error is not None:
+            raise self.interrupt_error
         self.interrupted = True
 
     async def close(self) -> None:
@@ -103,10 +107,61 @@ async def test_fake_native_provider_completes_session_lifecycle() -> None:
     assert SessionEventType.INTERRUPTED in {event.type for event in events}
 
 
+async def test_service_cleanup_continues_after_caller_cancellation() -> None:
+    registry = SessionRegistry()
+    await registry.create("voice-1")
+    close_started = asyncio.Event()
+    allow_close = asyncio.Event()
+    transports: list[FakeTransport] = []
+
+    class BlockingCloseTransport(FakeTransport):
+        async def close(self) -> None:
+            close_started.set()
+            await allow_close.wait()
+            self.closed = True
+
+    def create_transport(**kwargs: Any) -> FakeTransport:
+        transport = BlockingCloseTransport(**kwargs)
+        transports.append(transport)
+        return transport
+
+    service = GPTLiveService(
+        session_id="voice-1",
+        registry=registry,
+        credentials=FakeCredentials(),
+        transport_factory=create_transport,
+    )
+    await service._start_session()  # pyright: ignore[reportPrivateUsage]
+
+    cancelled_caller = asyncio.create_task(
+        service._close()  # pyright: ignore[reportPrivateUsage]
+    )
+    await close_started.wait()
+    cancelled_caller.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled_caller
+
+    replacement_cleanup = asyncio.create_task(
+        service._close()  # pyright: ignore[reportPrivateUsage]
+    )
+    await asyncio.sleep(0)
+    assert not replacement_cleanup.done()
+
+    allow_close.set()
+    await replacement_cleanup
+    assert transports[0].closed
+    assert (await registry.get("voice-1")).state is SessionState.CLOSED
+    assert await registry.audio_owner() is None
+
+
 async def test_pipecat_and_quicksilver_exchange_audio_in_process() -> None:
     registry = SessionRegistry()
     await registry.create("voice-1")
+    events: list[SessionEvent] = []
     transports: list[FakeTransport] = []
+
+    async def collect(event: SessionEvent) -> None:
+        events.append(event)
 
     def create_transport(**kwargs: Any) -> FakeTransport:
         transport = FakeTransport(**kwargs)
@@ -117,6 +172,7 @@ async def test_pipecat_and_quicksilver_exchange_audio_in_process() -> None:
         session_id="voice-1",
         registry=registry,
         credentials=FakeCredentials(),
+        event_sink=collect,
         transport_factory=create_transport,
     )
     await service._start_session()  # pyright: ignore[reportPrivateUsage]
@@ -126,6 +182,13 @@ async def test_pipecat_and_quicksilver_exchange_audio_in_process() -> None:
     assert transports[0].sent_audio == [
         AudioChunk(audio=client_audio.audio, sample_rate=16_000, num_channels=1)
     ]
+
+    await service.process_frame(client_audio, FrameDirection.DOWNSTREAM)
+    assert transports[0].sent_audio == [
+        AudioChunk(audio=client_audio.audio, sample_rate=16_000, num_channels=1),
+        AudioChunk(audio=client_audio.audio, sample_rate=16_000, num_channels=1),
+    ]
+    assert [event.type for event in events].count(SessionEventType.INPUT_AUDIO_STARTED) == 1
 
     provider_audio = AudioChunk(audio=b"\x03\x00\x04\x00", sample_rate=24_000, num_channels=1)
     await transports[0].audio_sink(provider_audio)
@@ -257,12 +320,11 @@ async def test_provider_open_failure_emits_normalized_failure_event() -> None:
 
 
 @pytest.mark.parametrize(
-    ("provider_message", "expected_message"),
-    [("provider unavailable", "provider unavailable"), (None, "provider error")],
+    "provider_message",
+    ["provider unavailable", None],
 )
 async def test_provider_error_emits_normalized_failure_event(
     provider_message: str | None,
-    expected_message: str,
 ) -> None:
     registry = SessionRegistry()
     await registry.create("voice-1")
@@ -304,9 +366,10 @@ async def test_provider_error_emits_normalized_failure_event(
             type=SessionEventType.ERROR,
             state=SessionState.FAILED,
             error_code="provider_error",
-            metadata={"message": expected_message},
+            metadata={"message": "provider error"},
         ),
     ]
+    assert transports[0].closed
 
 
 async def test_provider_error_emits_event_when_failed_transition_is_rejected() -> None:
@@ -343,7 +406,7 @@ async def test_provider_error_emits_event_when_failed_transition_is_rejected() -
             type=SessionEventType.ERROR,
             state=SessionState.FAILED,
             error_code="provider_error",
-            metadata={"message": "provider failed"},
+            metadata={"message": "provider error"},
         )
     ]
 
@@ -386,13 +449,133 @@ async def test_repeated_provider_errors_emit_one_failed_state_change() -> None:
             type=SessionEventType.ERROR,
             state=SessionState.FAILED,
             error_code="provider_error",
-            metadata={"message": "boom one"},
-        ),
-        SessionEvent(
-            session_id="voice-1",
-            type=SessionEventType.ERROR,
-            state=SessionState.FAILED,
-            error_code="provider_error",
-            metadata={"message": "boom two"},
+            metadata={"message": "provider error"},
         ),
     ]
+
+
+async def test_terminal_cleanup_is_idempotent() -> None:
+    registry = SessionRegistry()
+    snapshot = await registry.create("voice-1")
+    transports: list[FakeTransport] = []
+
+    def create_transport(**kwargs: Any) -> FakeTransport:
+        transport = FakeTransport(**kwargs)
+        transports.append(transport)
+        return transport
+
+    service = GPTLiveService(
+        session_id="voice-1",
+        generation=snapshot.generation,
+        registry=registry,
+        credentials=FakeCredentials(),
+        transport_factory=create_transport,
+    )
+    await service._start_session()  # pyright: ignore[reportPrivateUsage]
+
+    await service._close()  # pyright: ignore[reportPrivateUsage]
+    await service._close()  # pyright: ignore[reportPrivateUsage]
+
+    assert transports[0].closed
+    assert (await registry.get("voice-1")).state is SessionState.CLOSED
+    assert await registry.audio_owner() is None
+
+
+async def test_terminal_cleanup_survives_lifecycle_sink_failure() -> None:
+    registry = SessionRegistry()
+    snapshot = await registry.create("voice-1")
+    transports: list[FakeTransport] = []
+
+    async def fail_closing(event: SessionEvent) -> None:
+        if event.state is SessionState.CLOSING:
+            raise RuntimeError("lifecycle sink failed")
+
+    def create_transport(**kwargs: Any) -> FakeTransport:
+        transport = FakeTransport(**kwargs)
+        transports.append(transport)
+        return transport
+
+    service = GPTLiveService(
+        session_id="voice-1",
+        generation=snapshot.generation,
+        registry=registry,
+        credentials=FakeCredentials(),
+        event_sink=fail_closing,
+        transport_factory=create_transport,
+    )
+    await service._start_session()  # pyright: ignore[reportPrivateUsage]
+
+    with pytest.raises(RuntimeError, match="lifecycle sink failed"):
+        await service._close()  # pyright: ignore[reportPrivateUsage]
+
+    assert transports[0].closed
+    assert (await registry.get("voice-1")).state is SessionState.CLOSED
+    assert await registry.audio_owner() is None
+
+
+async def test_failed_interruption_returns_session_to_listening() -> None:
+    registry = SessionRegistry()
+    snapshot = await registry.create("voice-1")
+    transports: list[FakeTransport] = []
+
+    def create_transport(**kwargs: Any) -> FakeTransport:
+        transport = FakeTransport(**kwargs)
+        transport.interrupt_error = RuntimeError("interrupt failed")
+        transports.append(transport)
+        return transport
+
+    service = GPTLiveService(
+        session_id="voice-1",
+        generation=snapshot.generation,
+        registry=registry,
+        credentials=FakeCredentials(),
+        transport_factory=create_transport,
+    )
+    await service._start_session()  # pyright: ignore[reportPrivateUsage]
+
+    with pytest.raises(RuntimeError, match="interrupt failed"):
+        await service._interrupt()  # pyright: ignore[reportPrivateUsage]
+
+    assert (await registry.get("voice-1")).state is SessionState.LISTENING
+
+
+async def test_stale_provider_callbacks_cannot_mutate_recreated_session() -> None:
+    registry = SessionRegistry()
+    first = await registry.create("voice")
+    old_transports: list[FakeTransport] = []
+
+    def create_old_transport(**kwargs: Any) -> FakeTransport:
+        transport = FakeTransport(**kwargs)
+        old_transports.append(transport)
+        return transport
+
+    old_service = RecordingGPTLiveService(
+        session_id="voice",
+        generation=first.generation,
+        registry=registry,
+        credentials=FakeCredentials(),
+        transport_factory=create_old_transport,
+    )
+    await old_service._start_session()  # pyright: ignore[reportPrivateUsage]
+    await registry.transition("voice", SessionState.FAILED)
+    await registry.reap("voice", expected_generation=first.generation)
+    second = await registry.create("voice")
+    await registry.acquire_audio("voice", expected_generation=second.generation)
+
+    before = await registry.get("voice")
+    await old_transports[0].event_sink(
+        ProviderEvent(type="session.started", session_id="stale-provider")
+    )
+    await old_transports[0].audio_sink(
+        AudioChunk(audio=b"\x01\x00", sample_rate=24_000, num_channels=1)
+    )
+    await old_service.process_frame(
+        InputAudioRawFrame(audio=b"\x01\x00", sample_rate=16_000, num_channels=1),
+        FrameDirection.DOWNSTREAM,
+    )
+    await registry.release_audio("voice", expected_generation=first.generation)
+
+    assert await registry.get("voice") == before
+    assert await registry.audio_owner() == "voice"
+    assert old_transports[0].sent_audio == []
+    assert old_service.pushed_frames == []
