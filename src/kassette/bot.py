@@ -118,7 +118,9 @@ async def run_session(
         )
         if not previous_closed:
             logger.warning("kassette previous voice session cleanup failed during replacement")
-        await runner.run()
+        started = await lifecycle.run_active(handle, runner.run)
+        if not started:
+            logger.warning("kassette superseded voice session did not start")
     finally:
         try:
             await close_session()

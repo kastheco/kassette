@@ -37,6 +37,8 @@ class SessionHandle:
 
 
 CloseSession = Callable[[], Awaitable[None]]
+RunSession = Callable[[], Awaitable[None]]
+_MAX_SESSION_ID_CHARS = 96
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,20 +51,48 @@ class LiveSessionCoordinator:
     """Serialize replacement of the one localhost voice loop."""
 
     def __init__(self) -> None:
+        self._replacement_lock = asyncio.Lock()
         self._lock = asyncio.Lock()
         self._active: _ActiveSession | None = None
 
     async def replace(self, handle: SessionHandle, close: CloseSession) -> bool:
-        async with self._lock:
-            previous = self._active
-            self._active = _ActiveSession(handle, close)
-        if previous is not None and previous.handle != handle:
-            try:
-                await previous.close()
-            except BaseException:
-                # The replacement already owns the loop. A stale session's cleanup
-                # failure must not prevent the new client from starting.
-                return False
+        previous_closed = True
+        async with self._replacement_lock:
+            async with self._lock:
+                previous = self._active
+            if previous is not None and previous.handle != handle:
+                try:
+                    await previous.close()
+                except asyncio.CancelledError:
+                    task = asyncio.current_task()
+                    if task is not None and task.cancelling():
+                        raise
+                    previous_closed = False
+                except Exception:
+                    previous_closed = False
+            async with self._lock:
+                self._active = _ActiveSession(handle, close)
+        return previous_closed
+
+    async def run_active(self, handle: SessionHandle, run: RunSession) -> bool:
+        async with self._replacement_lock:
+            async with self._lock:
+                active = self._active
+                if active is None or active.handle != handle:
+                    return False
+
+                async def invoke_run() -> None:
+                    await run()
+
+                run_task = asyncio.create_task(invoke_run())
+
+                async def close_started_session() -> None:
+                    if not run_task.done():
+                        run_task.cancel()
+                    await active.close()
+
+                self._active = _ActiveSession(handle, close_started_session)
+        await run_task
         return True
 
     async def clear(self, handle: SessionHandle) -> None:
@@ -117,10 +147,12 @@ class SessionRegistry:
         self._audio_owner: SessionHandle | None = None
 
     async def create(self, session_id: str | None = None) -> VoiceSessionSnapshot:
+        resolved_id = session_id or str(uuid4())
+        if len(resolved_id) > _MAX_SESSION_ID_CHARS or not resolved_id.isprintable():
+            raise SessionRegistryError("invalid voice session identifier")
         async with self._lock:
-            resolved_id = session_id or str(uuid4())
             if resolved_id in self._sessions:
-                raise SessionRegistryError(f"voice session already exists: {resolved_id}")
+                raise SessionRegistryError("voice session already exists")
             self._next_generation += 1
             generation = self._next_generation
             session = VoiceSessionSnapshot(
@@ -181,9 +213,7 @@ class SessionRegistry:
             handle = SessionHandle(session_id, session.generation)
             owner = self._audio_owner
             if owner is not None and owner != handle:
-                raise AudioDeviceBusyError(
-                    f"local audio is already leased by voice session {owner.id}"
-                )
+                raise AudioDeviceBusyError("local audio is already leased by another voice session")
             self._audio_owner = handle
 
     async def release_audio(
@@ -218,9 +248,9 @@ class SessionRegistry:
         try:
             return self._sessions[session_id]
         except KeyError as error:
-            raise SessionNotFoundError(f"voice session not found: {session_id}") from error
+            raise SessionNotFoundError("voice session not found") from error
 
     @staticmethod
     def _require_generation(session: VoiceSessionSnapshot, expected_generation: int | None) -> None:
         if expected_generation is not None and session.generation != expected_generation:
-            raise SessionGenerationMismatchError(f"stale voice session generation for {session.id}")
+            raise SessionGenerationMismatchError("stale voice session generation")
