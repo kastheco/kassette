@@ -398,6 +398,9 @@ async def bot(runner_args: RunnerArguments) -> None:
 
 
 if __name__ == "__main__":
-    from pipecat.runner.run import main
+    from pipecat.runner.run import app, main
 
+    from kassette.tts_api import install_tts_route
+
+    install_tts_route(app)
     main()

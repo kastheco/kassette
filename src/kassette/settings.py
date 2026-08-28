@@ -57,15 +57,19 @@ class KassetteSettings(BaseSettings):
         validation_alias="ELEVENLABS_VOICE_ID",
     )
 
+    def fish_credential(self) -> str:
+        """Return the Fish Audio secret for live or on-demand synthesis."""
+        if self.fish_api_key is None:
+            raise RuntimeError("FISH_API_KEY is required for text-to-speech")
+        return self.fish_api_key.get_secret_value()
+
     def cascade_credentials(self) -> tuple[str, str]:
         """Return provider secrets only when the cascaded backend needs them."""
         if self.google_api_key is None:
             raise RuntimeError("GOOGLE_API_KEY is required for cascaded voice")
-        if self.fish_api_key is None:
-            raise RuntimeError("FISH_API_KEY is required for cascaded voice")
         return (
             self.google_api_key.get_secret_value(),
-            self.fish_api_key.get_secret_value(),
+            self.fish_credential(),
         )
 
     def comparison_credentials(self) -> tuple[str, str, str]:

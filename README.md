@@ -16,6 +16,8 @@ uv run kassette call
 
 The local `.env` file is gitignored. `GOOGLE_API_KEY` authenticates `gemini-3.5-transcribe-live`; `FISH_API_KEY` authenticates Fish Audio `s2.1-pro`. `FISH_VOICE_ID` is optional.
 
+Message-level playback uses `POST /api/tts` on the same local service. The endpoint accepts `{ "text": "..." }`, returns mono 24 kHz WAV audio, and keeps a small process-local content cache. Product clients should keep their own refresh-scoped audio cache so replay does not call the provider again.
+
 Generate the same sample through Eleven Flash v2.5, Eleven v3 Conversational, Fish S2.1 Pro Free, and Fish S2.1 Pro with:
 
 ```bash
@@ -46,6 +48,7 @@ Included now:
 - Gemini 3.5 Transcribe Live through Pipecat's streaming STT service
 - provider-neutral partial/final transcript events over the WebRTC data channel
 - Fish Audio streaming TTS for agent responses
+- local on-demand WAV generation for message playback through `POST /api/tts`
 - GPT-Live behind an isolated, opt-in Quicksilver adapter
 - interruption and clean session shutdown
 
