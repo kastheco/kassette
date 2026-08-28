@@ -6,8 +6,38 @@ import pytest
 
 from kassette.bot import (
     _await_finalizer,
+    _PausableGeminiSTTService,
     _SessionCloser,
 )
+
+
+class RecordingPausableGeminiSTTService(_PausableGeminiSTTService):
+    _INPUT_PAUSE_GRACE_SECS = 0
+
+    def __init__(self) -> None:
+        self._input_paused = False
+        self._input_pause_lock = None
+        self.calls: list[str] = []
+
+    async def _send_finalization_signal(self) -> None:
+        self.calls.append("finalize")
+
+    async def _disconnect(self) -> None:
+        self.calls.append("disconnect")
+
+    async def _connect(self) -> None:
+        self.calls.append("connect")
+
+
+async def test_paused_gemini_input_disconnects_and_reconnects_idempotently() -> None:
+    service = RecordingPausableGeminiSTTService()
+
+    await service.pause_input()
+    await service.pause_input()
+    await service.resume_input()
+    await service.resume_input()
+
+    assert service.calls == ["finalize", "disconnect", "connect"]
 
 
 async def test_session_cleanup_is_attempted_once_after_failure() -> None:

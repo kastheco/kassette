@@ -228,12 +228,29 @@ async def test_input_audio_track_enforces_chunk_size_bound() -> None:
     track = _InputAudioTrack()
     accepted = AudioChunk(audio=b"\x00" * 65_536, sample_rate=16_000, num_channels=1)
 
-    track.write(accepted)
+    await track.write(accepted)
     with pytest.raises(QuicksilverTransportError, match="audio chunk is too large"):
-        track.write(AudioChunk(audio=b"\x00" * 65_538, sample_rate=16_000, num_channels=1))
+        await track.write(AudioChunk(audio=b"\x00" * 65_538, sample_rate=16_000, num_channels=1))
 
     frame = await track.recv()
     assert frame.samples == 32_768
+    await track.close()
+
+
+async def test_input_audio_backpressures_during_delayed_rtp_consumption() -> None:
+    track = _InputAudioTrack()
+    chunk = AudioChunk(audio=b"\x00" * 640, sample_rate=16_000, num_channels=1)
+
+    async def produce() -> None:
+        for _ in range(129):
+            await track.write(chunk)
+
+    async def consume() -> None:
+        await asyncio.sleep(0.01)
+        for _ in range(129):
+            await track.recv()
+
+    await asyncio.wait_for(asyncio.gather(produce(), consume()), timeout=1)
     await track.close()
 
 
