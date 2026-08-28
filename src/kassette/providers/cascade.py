@@ -35,6 +35,9 @@ class CascadedVoiceEvents(FrameProcessor):
         event_sink: EventSink | None = None,
         name: str | None = None,
         enable_direct_mode: bool = False,
+        publish_transcripts: bool = True,
+        publish_speech: bool = True,
+        publish_start_state: bool = True,
     ) -> None:
         super().__init__(  # pyright: ignore[reportUnknownMemberType]
             name=name,
@@ -42,6 +45,9 @@ class CascadedVoiceEvents(FrameProcessor):
         )
         self._session_id = session_id
         self._event_sink = event_sink or _discard_event
+        self._publish_transcripts = publish_transcripts
+        self._publish_speech = publish_speech
+        self._publish_start_state = publish_start_state
         self._turn_number = 0
         self._active_turn_id: str | None = None
         self._sequence = 0
@@ -49,13 +55,13 @@ class CascadedVoiceEvents(FrameProcessor):
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
         await super().process_frame(frame, direction)
 
-        if isinstance(frame, StartFrame):
+        if isinstance(frame, StartFrame) and self._publish_start_state:
             await self.publish_state(SessionState.LISTENING)
-        elif isinstance(frame, InterimTranscriptionFrame):
+        elif isinstance(frame, InterimTranscriptionFrame) and self._publish_transcripts:
             await self._publish_transcript(frame.text, final=False)
-        elif isinstance(frame, TranscriptionFrame):
+        elif isinstance(frame, TranscriptionFrame) and self._publish_transcripts:
             await self._publish_transcript(frame.text, final=True)
-        elif isinstance(frame, TTSStartedFrame):
+        elif isinstance(frame, TTSStartedFrame) and self._publish_speech:
             await self.publish_state(SessionState.SPEAKING)
             await self._event_sink(
                 SessionEvent(
@@ -64,7 +70,7 @@ class CascadedVoiceEvents(FrameProcessor):
                     state=SessionState.SPEAKING,
                 )
             )
-        elif isinstance(frame, TTSStoppedFrame):
+        elif isinstance(frame, TTSStoppedFrame) and self._publish_speech:
             await self.publish_state(SessionState.LISTENING)
             await self._event_sink(
                 SessionEvent(

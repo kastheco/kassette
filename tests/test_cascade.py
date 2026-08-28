@@ -115,6 +115,28 @@ async def test_tts_frames_publish_speaking_and_listening_states() -> None:
     ]
 
 
+async def test_transcript_and_speech_events_can_run_on_opposite_sides_of_tts() -> None:
+    transcript_events = RecordingCascadedVoiceEvents(
+        session_id="voice-1",
+        publish_speech=False,
+    )
+    speech_events = RecordingCascadedVoiceEvents(
+        session_id="voice-1",
+        publish_transcripts=False,
+        publish_start_state=False,
+    )
+    transcript = InterimTranscriptionFrame("heard during playback", "owner", "now")
+
+    await transcript_events.process_frame(transcript, FrameDirection.DOWNSTREAM)
+    await transcript_events.process_frame(TTSStartedFrame(), FrameDirection.DOWNSTREAM)
+    await speech_events.process_frame(transcript, FrameDirection.DOWNSTREAM)
+    await speech_events.process_frame(TTSStartedFrame(), FrameDirection.DOWNSTREAM)
+
+    assert [message["type"] for message in _messages(transcript_events)] == ["transcript.delta"]
+    assert [message["type"] for message in _messages(speech_events)] == ["session.state_changed"]
+    assert _messages(speech_events)[0]["data"]["state"] == SessionState.SPEAKING.value
+
+
 async def test_client_voice_messages_control_tts_and_microphone_input() -> None:
     spoken: list[str] = []
     input_states: list[bool] = []
@@ -162,7 +184,7 @@ def test_settings_default_vad_stop_secs(
 
     settings = load_settings(env_file=tmp_path / "missing.env")
 
-    assert settings.vad_stop_secs == 1.0
+    assert settings.vad_stop_secs == 1.8
 
 
 def test_settings_load_gitignored_dotenv_without_exposing_secrets(tmp_path: Path) -> None:

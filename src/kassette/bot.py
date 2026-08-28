@@ -265,8 +265,30 @@ async def run_cascaded_session(
             voice=settings.fish_voice_id,
         ),
     )
-    events = CascadedVoiceEvents(session_id=session_id, event_sink=collect)
-    pipeline = Pipeline([transport.input(), vad, stt, tts, events, transport.output()])
+    transcript_events = CascadedVoiceEvents(
+        session_id=session_id,
+        event_sink=collect,
+        name="CascadedTranscriptEvents",
+        publish_speech=False,
+    )
+    speech_events = CascadedVoiceEvents(
+        session_id=session_id,
+        event_sink=collect,
+        name="CascadedSpeechEvents",
+        publish_transcripts=False,
+        publish_start_state=False,
+    )
+    pipeline = Pipeline(
+        [
+            transport.input(),
+            vad,
+            stt,
+            transcript_events,
+            tts,
+            speech_events,
+            transport.output(),
+        ]
+    )
     worker = PipelineWorker(
         pipeline,
         params=PipelineParams(enable_metrics=True, enable_usage_metrics=False),
@@ -282,7 +304,7 @@ async def run_cascaded_session(
             await stt.pause_input()
         else:
             await stt.resume_input()
-        await events.publish_input_state(paused=paused)
+        await transcript_events.publish_input_state(paused=paused)
 
     @transport.event_handler("on_app_message")
     async def on_app_message(

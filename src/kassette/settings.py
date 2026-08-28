@@ -23,7 +23,7 @@ class KassetteSettings(BaseSettings):
         validation_alias="KASSETTE_VOICE_BACKEND",
     )
     vad_stop_secs: float = Field(
-        default=1.0,
+        default=1.8,
         gt=0,
         validation_alias="KASSETTE_VAD_STOP_SECS",
     )
