@@ -86,15 +86,12 @@ class _InputAudioTrack(MediaStreamTrack):
         self._pts += samples
         return frame
 
-    def write(self, chunk: AudioChunk) -> None:
+    async def write(self, chunk: AudioChunk) -> None:
         if self.readyState == "ended":
             return
         if len(chunk.audio) > _MAX_INPUT_AUDIO_BYTES:
             raise QuicksilverTransportError("Quicksilver input audio chunk is too large")
-        try:
-            self._queue.put_nowait(chunk)
-        except asyncio.QueueFull as error:
-            raise QuicksilverTransportError("Quicksilver input audio queue is full") from error
+        await self._queue.put(chunk)
 
     async def close(self) -> None:
         if self.readyState == "ended":
@@ -204,7 +201,7 @@ class QuicksilverTransport:
     async def send_audio(self, chunk: AudioChunk) -> None:
         if not self._connected or self._input_track is None:
             raise QuicksilverTransportError("Quicksilver transport is not connected")
-        self._input_track.write(chunk)
+        await self._input_track.write(chunk)
 
     async def send(self, message: dict[str, Any]) -> None:
         if not self._connected or self._sideband is None or self._sideband.closed:

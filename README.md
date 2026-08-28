@@ -2,17 +2,29 @@
 
 kassette is a local realtime voice service built on Pipecat. It owns transient voice sessions and the audio path. Products and agent runtimes keep their own durable conversations.
 
-The first delivery puts the full local loop in one process: a localhost service, an in-process Quicksilver adapter, and a SmallWebRTC browser client.
-
-The service starts, the client loads, and direct provider signaling succeeds. See [`docs/live-validation.md`](docs/live-validation.md) for the remaining browser voice check.
+The default pipeline is cascaded: Gemini 3.5 Transcribe Live produces provisional and finalized owner transcripts, ClickClack commits finalized turns to its normal message API for OpenClaw, and Fish Audio streams agent responses back through the existing SmallWebRTC connection. The legacy Quicksilver GPT-Live adapter remains available as an explicit fallback.
 
 ## Development
 
 ```bash
 uv sync
-uv run kassette serve
+cp .env.example .env
+# Add GOOGLE_API_KEY and FISH_API_KEY to .env.
+uv run kassette serve --client-origin http://127.0.0.1:5173
 uv run kassette call
 ```
+
+The local `.env` file is gitignored. `GOOGLE_API_KEY` authenticates `gemini-3.5-transcribe-live`; `FISH_API_KEY` authenticates Fish Audio `s2.1-pro`. `FISH_VOICE_ID` is optional.
+
+Generate the same sample through Eleven Flash v2.5, Eleven v3 Conversational, Fish S2.1 Pro Free, and Fish S2.1 Pro with:
+
+```bash
+uv run python scripts/compare_tts.py
+# Or provide your own sample:
+uv run python scripts/compare_tts.py --text-file sample.txt
+```
+
+The comparison requires `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID`, `FISH_API_KEY`, and optionally `FISH_VOICE_ID` in `.env`. It writes WAV files, timing and cost metadata, and a listening page under `artifacts/tts-comparison/`.
 
 Run the checks with:
 
@@ -31,13 +43,16 @@ Included now:
 - identified native voice sessions
 - one local audio lease
 - localhost-only client transport
-- GPT-Live behind an isolated Quicksilver adapter
+- Gemini 3.5 Transcribe Live through Pipecat's streaming STT service
+- provider-neutral partial/final transcript events over the WebRTC data channel
+- Fish Audio streaming TTS for agent responses
+- GPT-Live behind an isolated, opt-in Quicksilver adapter
 - interruption and clean session shutdown
 
 Not included yet:
 
 - durable state or product-specific clients
-- cascaded STT and TTS providers
+- server-owned durable conversation state
 - remote ingress, TLS, or TURN
 - provider hot swap
 - daemon installation and upgrades
