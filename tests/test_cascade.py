@@ -264,7 +264,12 @@ def test_settings_default_vad_stop_secs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("KASSETTE_VAD_STOP_SECS", raising=False)
+    for name in (
+        "KASSETTE_VAD_STOP_SECS",
+        "KASSETTE_TRANSCRIPT_GROOMING_PROFILE",
+        "KASSETTE_TRANSCRIPT_GROOMING_TIMEOUT_SECS",
+    ):
+        monkeypatch.delenv(name, raising=False)
 
     settings = load_settings(env_file=tmp_path / "missing.env")
 
@@ -273,7 +278,23 @@ def test_settings_default_vad_stop_secs(
     assert settings.transcript_grooming_timeout_secs == 0.5
 
 
-def test_settings_load_gitignored_dotenv_without_exposing_secrets(tmp_path: Path) -> None:
+def test_settings_load_gitignored_dotenv_without_exposing_secrets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in (
+        "GOOGLE_API_KEY",
+        "FISH_API_KEY",
+        "FISH_MODEL",
+        "FISH_VOICE_ID",
+        "KASSETTE_VAD_STOP_SECS",
+        "KASSETTE_TRANSCRIPT_GROOMING_PROFILE",
+        "KASSETTE_TRANSCRIPT_GROOMING_TIMEOUT_SECS",
+        "ELEVENLABS_API_KEY",
+        "ELEVENLABS_VOICE_ID",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
     env_file = tmp_path / ".env"
     env_file.write_text(
         "GOOGLE_API_KEY=google-secret\n"
