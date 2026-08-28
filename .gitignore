@@ -13,4 +13,5 @@ build/
 .env.*
 !.env.example
 .pi/
+/.worktrees/
 /artifacts/tts-comparison/

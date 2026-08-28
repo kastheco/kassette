@@ -13,7 +13,6 @@ from uuid import uuid4
 from loguru import logger
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams
-from pipecat.frames.frames import TTSSpeakFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.worker import PipelineParams, PipelineWorker
 from pipecat.processors.audio.vad_processor import VADProcessor
@@ -27,7 +26,11 @@ from pipecat.workers.runner import WorkerRunner
 from kassette.credentials import CodexCredentialProvider, PiAuthCredentialProvider
 from kassette.diagnostics import LifecycleDiagnostics
 from kassette.domain import SessionEvent, SessionEventType, SessionState
-from kassette.providers.cascade import CascadedVoiceEvents, handle_client_message
+from kassette.providers.cascade import (
+    CascadedBargeInProcessor,
+    CascadedVoiceEvents,
+    handle_client_message,
+)
 from kassette.providers.quicksilver.service import GPTLiveService, TransportFactory
 from kassette.providers.quicksilver.transport import QuicksilverTransport
 from kassette.sessions import (
@@ -279,6 +282,7 @@ async def run_cascaded_session(
         name="CascadedTranscriptEvents",
         publish_speech=False,
     )
+    barge_in = CascadedBargeInProcessor(name="CascadedBargeIn")
     speech_events = CascadedVoiceEvents(
         session_id=session_id,
         event_sink=collect,
@@ -294,6 +298,7 @@ async def run_cascaded_session(
             transcript_grooming,
             transcript_events,
             tts,
+            barge_in,
             speech_events,
             transport.output(),
         ]
@@ -306,7 +311,7 @@ async def run_cascaded_session(
     await runner.add_workers(worker)
 
     async def speak(text: str) -> None:
-        await worker.queue_frame(TTSSpeakFrame(text=text, append_to_context=False))
+        await barge_in.queue_speech(text, worker.queue_frame)
 
     async def set_input_paused(paused: bool) -> None:
         if paused:

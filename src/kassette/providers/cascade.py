@@ -8,11 +8,14 @@ from typing import Any, cast
 from pipecat.frames.frames import (
     Frame,
     InterimTranscriptionFrame,
+    InterruptionFrame,
     OutputTransportMessageUrgentFrame,
     StartFrame,
     TranscriptionFrame,
+    TTSSpeakFrame,
     TTSStartedFrame,
     TTSStoppedFrame,
+    VADUserStartedSpeakingFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
@@ -23,6 +26,51 @@ _MAX_TRANSCRIPT_CHARS = 32_000
 
 async def _discard_event(_: SessionEvent) -> None:
     return
+
+
+class CascadedBargeInProcessor(FrameProcessor):
+    """Flush queued or active speech as soon as VAD detects user speech."""
+
+    def __init__(self, *, name: str | None = None) -> None:
+        super().__init__(name=name)  # pyright: ignore[reportUnknownMemberType]
+        self._queued_speech = 0
+        self._active_speech = 0
+
+    async def queue_speech(
+        self,
+        text: str,
+        enqueue: Callable[[Frame], Awaitable[None]],
+    ) -> None:
+        """Queue speech while keeping barge-in state consistent on failure."""
+        self._queued_speech += 1
+        try:
+            await enqueue(TTSSpeakFrame(text=text, append_to_context=False))
+        except BaseException:
+            self._queued_speech = max(0, self._queued_speech - 1)
+            raise
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
+        await super().process_frame(frame, direction)
+
+        if isinstance(frame, TTSStartedFrame):
+            self._queued_speech = max(0, self._queued_speech - 1)
+            self._active_speech += 1
+        elif isinstance(frame, TTSStoppedFrame):
+            self._active_speech = max(0, self._active_speech - 1)
+        elif isinstance(frame, InterruptionFrame):
+            self._reset_speech()
+        elif isinstance(frame, VADUserStartedSpeakingFrame) and self._speech_pending():
+            self._reset_speech()
+            await self.broadcast_interruption()
+
+        await self.push_frame(frame, direction)
+
+    def _speech_pending(self) -> bool:
+        return self._queued_speech > 0 or self._active_speech > 0
+
+    def _reset_speech(self) -> None:
+        self._queued_speech = 0
+        self._active_speech = 0
 
 
 class CascadedVoiceEvents(FrameProcessor):
@@ -79,6 +127,15 @@ class CascadedVoiceEvents(FrameProcessor):
                     state=SessionState.LISTENING,
                 )
             )
+        elif isinstance(frame, InterruptionFrame) and self._publish_speech:
+            await self._event_sink(
+                SessionEvent(
+                    session_id=self._session_id,
+                    type=SessionEventType.INTERRUPTED,
+                    state=SessionState.INTERRUPTING,
+                )
+            )
+            await self.publish_state(SessionState.LISTENING)
 
         await self.push_frame(frame, direction)
 
