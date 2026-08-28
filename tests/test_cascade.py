@@ -185,6 +185,8 @@ def test_settings_default_vad_stop_secs(
     settings = load_settings(env_file=tmp_path / "missing.env")
 
     assert settings.vad_stop_secs == 1.8
+    assert settings.transcript_grooming_profile is None
+    assert settings.transcript_grooming_timeout_secs == 0.5
 
 
 def test_settings_load_gitignored_dotenv_without_exposing_secrets(tmp_path: Path) -> None:
@@ -195,6 +197,8 @@ def test_settings_load_gitignored_dotenv_without_exposing_secrets(tmp_path: Path
         "FISH_MODEL=s2.1-pro\n"
         "FISH_VOICE_ID=voice-1\n"
         "KASSETTE_VAD_STOP_SECS=1.25\n"
+        "KASSETTE_TRANSCRIPT_GROOMING_PROFILE=/tmp/grooming.json\n"
+        "KASSETTE_TRANSCRIPT_GROOMING_TIMEOUT_SECS=0.75\n"
         "ELEVENLABS_API_KEY=eleven-secret\n"
         "ELEVENLABS_VOICE_ID=eleven-voice-1\n",
         encoding="utf-8",
@@ -207,6 +211,8 @@ def test_settings_load_gitignored_dotenv_without_exposing_secrets(tmp_path: Path
     assert fish_api_key == "fish-secret"
     assert settings.fish_voice_id == "voice-1"
     assert settings.vad_stop_secs == 1.25
+    assert settings.transcript_grooming_profile == Path("/tmp/grooming.json")
+    assert settings.transcript_grooming_timeout_secs == 0.75
     eleven_key, eleven_voice, comparison_fish_key = settings.comparison_credentials()
     assert eleven_key == "eleven-secret"
     assert eleven_voice == "eleven-voice-1"

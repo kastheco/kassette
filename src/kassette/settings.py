@@ -27,6 +27,16 @@ class KassetteSettings(BaseSettings):
         gt=0,
         validation_alias="KASSETTE_VAD_STOP_SECS",
     )
+    transcript_grooming_profile: Path | None = Field(
+        default=None,
+        validation_alias="KASSETTE_TRANSCRIPT_GROOMING_PROFILE",
+    )
+    transcript_grooming_timeout_secs: float = Field(
+        default=0.5,
+        gt=0,
+        le=10,
+        validation_alias="KASSETTE_TRANSCRIPT_GROOMING_TIMEOUT_SECS",
+    )
     google_api_key: SecretStr | None = Field(
         default=None,
         min_length=1,

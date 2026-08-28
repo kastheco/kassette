@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "lowercase": false,
+  "preserve_pronoun_i": true,
+  "collapse_whitespace": true,
+  "word_overrides": {
+    "example misrecognition": "preferred spelling"
+  }
+}

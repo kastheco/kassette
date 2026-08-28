@@ -37,6 +37,10 @@ from kassette.sessions import (
     SessionRegistry,
 )
 from kassette.settings import KassetteSettings, load_settings
+from kassette.transcript_grooming import (
+    TranscriptGroomingProcessor,
+    load_transcript_groomer,
+)
 
 _registry = SessionRegistry()
 _lifecycle = LiveSessionCoordinator()
@@ -257,6 +261,10 @@ async def run_cascaded_session(
         )
     )
     stt = _PausableGeminiSTTService(api_key=google_api_key, sample_rate=16_000)
+    transcript_grooming = TranscriptGroomingProcessor(
+        load_transcript_groomer(settings.transcript_grooming_profile),
+        timeout_secs=settings.transcript_grooming_timeout_secs,
+    )
     tts = FishAudioTTSService(
         api_key=fish_api_key,
         sample_rate=24_000,
@@ -283,6 +291,7 @@ async def run_cascaded_session(
             transport.input(),
             vad,
             stt,
+            transcript_grooming,
             transcript_events,
             tts,
             speech_events,

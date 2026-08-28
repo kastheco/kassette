@@ -18,6 +18,16 @@ The local `.env` file is gitignored. `GOOGLE_API_KEY` authenticates `gemini-3.5-
 
 Message-level playback uses `POST /api/tts` on the same local service. The endpoint accepts `{ "text": "..." }`, returns mono 24 kHz WAV audio, and keeps a small process-local content cache. Product clients should keep their own refresh-scoped audio cache so replay does not call the provider again.
 
+### Transcript grooming
+
+Kassette defaults to preserving provider transcripts exactly. To apply fast deterministic corrections after STT and before transcript events, copy [`docs/transcript-grooming.example.json`](docs/transcript-grooming.example.json) outside the repository and set:
+
+```bash
+KASSETTE_TRANSCRIPT_GROOMING_PROFILE=/absolute/path/to/transcript-grooming.json
+```
+
+The version 1 profile supports boundaried word overrides, whitespace normalization, optional lowercase output, and restoration of the pronoun `I`. Rules apply to interim and final transcripts, fail open to provider text, and remain upstream of TTS so grooming cannot delay audio playback. Personal vocabulary belongs in the external profile, not the repository. See [ADR 0003](docs/adr/0003-groom-transcripts-at-a-provider-neutral-seam.md).
+
 Generate the same sample through Eleven Flash v2.5, Eleven v3 Conversational, Fish S2.1 Pro Free, and Fish S2.1 Pro with:
 
 ```bash
@@ -47,6 +57,7 @@ Included now:
 - localhost-only client transport
 - Gemini 3.5 Transcribe Live through Pipecat's streaming STT service
 - provider-neutral partial/final transcript events over the WebRTC data channel
+- optional provider-neutral transcript grooming through external profiles
 - Fish Audio streaming TTS for agent responses
 - local on-demand WAV generation for message playback through `POST /api/tts`
 - GPT-Live behind an isolated, opt-in Quicksilver adapter
