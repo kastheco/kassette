@@ -14,6 +14,7 @@ class SessionState(StrEnum):
     LISTENING = "listening"
     SPEAKING = "speaking"
     INTERRUPTING = "interrupting"
+    SWITCHING = "switching"
     CLOSING = "closing"
     CLOSED = "closed"
     FAILED = "failed"
@@ -33,6 +34,13 @@ class SessionEventType(StrEnum):
     INTERRUPTED = "session.interrupted"
     DELEGATION_UNAVAILABLE = "delegation.unavailable"
     PROVIDER_UNKNOWN = "provider.unknown"
+    PROVIDER_AVAILABLE = "provider.available"
+    PROVIDER_SWITCH_REQUESTED = "provider.switch.requested"
+    PROVIDER_SWITCHING = "provider.switching"
+    PROVIDER_ACTIVE = "provider.active"
+    PROVIDER_SWITCH_REFUSED = "provider.switch.refused"
+    PROVIDER_SWITCH_FAILED = "provider.switch.failed"
+    PROVIDER_FALLBACK_ACTIVE = "provider.fallback.active"
     ERROR = "session.error"
 
 
@@ -79,6 +87,9 @@ class VoiceSessionSnapshot:
     id: str
     state: SessionState
     generation: int = 1
+    provider_generation: int = 0
+    active_provider: str | None = None
+    desired_provider: str | None = None
     provider_session_id: str | None = None
     error_code: str | None = None
 

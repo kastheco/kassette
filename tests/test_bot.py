@@ -4,14 +4,11 @@ import asyncio
 
 import pytest
 
-from kassette.bot import (
-    _await_finalizer,
-    _PausableGeminiSTTService,
-    _SessionCloser,
-)
+from kassette.bot import _await_finalizer, _SessionCloser
+from kassette.providers.builtin import PausableGeminiSTTService
 
 
-class RecordingPausableGeminiSTTService(_PausableGeminiSTTService):
+class RecordingPausableGeminiSTTService(PausableGeminiSTTService):
     _INPUT_PAUSE_GRACE_SECS = 0
 
     def __init__(self) -> None:

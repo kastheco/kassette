@@ -118,12 +118,18 @@ _ALLOWED_TRANSITIONS: dict[SessionState, frozenset[SessionState]] = {
         {SessionState.CONNECTING, SessionState.CLOSING, SessionState.FAILED}
     ),
     SessionState.CONNECTING: frozenset(
-        {SessionState.LISTENING, SessionState.CLOSING, SessionState.FAILED}
+        {
+            SessionState.LISTENING,
+            SessionState.SWITCHING,
+            SessionState.CLOSING,
+            SessionState.FAILED,
+        }
     ),
     SessionState.LISTENING: frozenset(
         {
             SessionState.SPEAKING,
             SessionState.INTERRUPTING,
+            SessionState.SWITCHING,
             SessionState.CLOSING,
             SessionState.FAILED,
         }
@@ -138,6 +144,9 @@ _ALLOWED_TRANSITIONS: dict[SessionState, frozenset[SessionState]] = {
     ),
     SessionState.INTERRUPTING: frozenset(
         {SessionState.LISTENING, SessionState.CLOSING, SessionState.FAILED}
+    ),
+    SessionState.SWITCHING: frozenset(
+        {SessionState.CONNECTING, SessionState.CLOSING, SessionState.FAILED}
     ),
     SessionState.CLOSING: frozenset({SessionState.CLOSED, SessionState.FAILED}),
     SessionState.CLOSED: frozenset(),
@@ -154,7 +163,12 @@ class SessionRegistry:
         self._next_generation = 0
         self._audio_owner: SessionHandle | None = None
 
-    async def create(self, session_id: str | None = None) -> VoiceSessionSnapshot:
+    async def create(
+        self,
+        session_id: str | None = None,
+        *,
+        initial_provider_id: str | None = None,
+    ) -> VoiceSessionSnapshot:
         resolved_id = session_id or str(uuid4())
         if len(resolved_id) > _MAX_SESSION_ID_CHARS or not resolved_id.isprintable():
             raise SessionRegistryError("invalid voice session identifier")
@@ -167,6 +181,9 @@ class SessionRegistry:
                 id=resolved_id,
                 state=SessionState.CREATED,
                 generation=generation,
+                provider_generation=1 if initial_provider_id is not None else 0,
+                active_provider=initial_provider_id,
+                desired_provider=initial_provider_id,
             )
             self._sessions[resolved_id] = session
             return session
@@ -179,6 +196,91 @@ class SessionRegistry:
         async with self._lock:
             return tuple(self._sessions.values())
 
+    async def begin_provider_switch(
+        self,
+        session_id: str,
+        provider_id: str,
+        *,
+        expected_generation: int | None = None,
+        expected_provider_generation: int | None = None,
+    ) -> VoiceSessionSnapshot:
+        """Fence the current adapter and enter a provider switch."""
+        async with self._lock:
+            current = self._require(session_id)
+            self._require_generation(current, expected_generation)
+            self._require_provider_generation(current, expected_provider_generation)
+            if current.state is not SessionState.LISTENING:
+                raise InvalidSessionTransitionError(
+                    f"cannot switch provider while voice session is {current.state}"
+                )
+            next_session = replace(
+                current,
+                state=SessionState.SWITCHING,
+                provider_generation=current.provider_generation + 1,
+                desired_provider=provider_id,
+                provider_session_id=None,
+                error_code=None,
+            )
+            self._sessions[session_id] = next_session
+            return next_session
+
+    async def restart_provider_switch(
+        self,
+        session_id: str,
+        provider_id: str,
+        *,
+        expected_generation: int | None = None,
+        expected_provider_generation: int | None = None,
+    ) -> VoiceSessionSnapshot:
+        """Fence a failed replacement before rebuilding the previous adapter."""
+        async with self._lock:
+            current = self._require(session_id)
+            self._require_generation(current, expected_generation)
+            self._require_provider_generation(current, expected_provider_generation)
+            if current.state in TERMINAL_SESSION_STATES or current.state is SessionState.CLOSING:
+                raise InvalidSessionTransitionError(
+                    f"cannot recover provider while voice session is {current.state}"
+                )
+            next_session = replace(
+                current,
+                state=SessionState.SWITCHING,
+                provider_generation=current.provider_generation + 1,
+                desired_provider=provider_id,
+                provider_session_id=None,
+                error_code=None,
+            )
+            self._sessions[session_id] = next_session
+            return next_session
+
+    async def activate_provider(
+        self,
+        session_id: str,
+        provider_id: str,
+        *,
+        expected_generation: int | None = None,
+        expected_provider_generation: int | None = None,
+    ) -> VoiceSessionSnapshot:
+        """Make the desired adapter active while it establishes its provider session."""
+        async with self._lock:
+            current = self._require(session_id)
+            self._require_generation(current, expected_generation)
+            self._require_provider_generation(current, expected_provider_generation)
+            if current.state is not SessionState.SWITCHING:
+                raise InvalidSessionTransitionError(
+                    f"cannot activate provider while voice session is {current.state}"
+                )
+            if current.desired_provider != provider_id:
+                raise SessionGenerationMismatchError("stale desired voice provider")
+            next_session = replace(
+                current,
+                state=SessionState.CONNECTING,
+                active_provider=provider_id,
+                provider_session_id=None,
+                error_code=None,
+            )
+            self._sessions[session_id] = next_session
+            return next_session
+
     async def transition(
         self,
         session_id: str,
@@ -187,10 +289,12 @@ class SessionRegistry:
         provider_session_id: str | None = None,
         error_code: str | None = None,
         expected_generation: int | None = None,
+        expected_provider_generation: int | None = None,
     ) -> VoiceSessionSnapshot:
         async with self._lock:
             current = self._require(session_id)
             self._require_generation(current, expected_generation)
+            self._require_provider_generation(current, expected_provider_generation)
             if state == current.state:
                 return current
             if state not in _ALLOWED_TRANSITIONS[current.state]:
@@ -262,3 +366,14 @@ class SessionRegistry:
     def _require_generation(session: VoiceSessionSnapshot, expected_generation: int | None) -> None:
         if expected_generation is not None and session.generation != expected_generation:
             raise SessionGenerationMismatchError("stale voice session generation")
+
+    @staticmethod
+    def _require_provider_generation(
+        session: VoiceSessionSnapshot,
+        expected_provider_generation: int | None,
+    ) -> None:
+        if (
+            expected_provider_generation is not None
+            and session.provider_generation != expected_provider_generation
+        ):
+            raise SessionGenerationMismatchError("stale voice provider generation")

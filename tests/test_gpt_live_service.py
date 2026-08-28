@@ -107,6 +107,51 @@ async def test_fake_native_provider_completes_session_lifecycle() -> None:
     assert SessionEventType.INTERRUPTED in {event.type for event in events}
 
 
+async def test_external_runtime_owns_session_lifecycle_and_audio_lease() -> None:
+    registry = SessionRegistry()
+    snapshot = await registry.create("voice-1", initial_provider_id="quicksilver")
+    await registry.acquire_audio("voice-1", expected_generation=snapshot.generation)
+    await registry.transition(
+        "voice-1",
+        SessionState.CONNECTING,
+        expected_generation=snapshot.generation,
+        expected_provider_generation=snapshot.provider_generation,
+    )
+    events: list[SessionEvent] = []
+    transports: list[FakeTransport] = []
+
+    def create_transport(**kwargs: Any) -> FakeTransport:
+        transport = FakeTransport(**kwargs)
+        transports.append(transport)
+        return transport
+
+    async def collect(event: SessionEvent) -> None:
+        events.append(event)
+
+    service = GPTLiveService(
+        session_id="voice-1",
+        generation=snapshot.generation,
+        registry=registry,
+        credentials=FakeCredentials(),
+        event_sink=collect,
+        transport_factory=create_transport,
+        manage_session_lifecycle=False,
+    )
+
+    await service._start_session()  # pyright: ignore[reportPrivateUsage]
+    await service._close()  # pyright: ignore[reportPrivateUsage]
+
+    current = await registry.get("voice-1")
+    assert current.state is SessionState.CONNECTING
+    assert await registry.audio_owner() == "voice-1"
+    assert transports[0].closed is True
+    listening = next(
+        event for event in events if event.type is SessionEventType.SESSION_STATE_CHANGED
+    )
+    assert listening.state is SessionState.LISTENING
+    assert listening.metadata["provider_session_id"] == "provider-1"
+
+
 async def test_service_cleanup_continues_after_caller_cancellation() -> None:
     registry = SessionRegistry()
     await registry.create("voice-1")

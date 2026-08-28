@@ -79,6 +79,7 @@ class GPTLiveService(FrameProcessor):
         generation: int = 1,
         name: str | None = None,
         enable_direct_mode: bool = False,
+        manage_session_lifecycle: bool = True,
     ) -> None:
         super().__init__(  # pyright: ignore[reportUnknownMemberType]
             name=name,
@@ -88,6 +89,7 @@ class GPTLiveService(FrameProcessor):
         self._generation = generation
         self._registry = registry
         self._event_sink = event_sink or _discard_event
+        self._manage_session_lifecycle = manage_session_lifecycle
         self._transport = transport_factory(
             session_id=session_id,
             credentials=credentials,
@@ -134,12 +136,14 @@ class GPTLiveService(FrameProcessor):
         await self.push_frame(frame, direction)
 
     async def _start_session(self) -> None:
-        await self._registry.acquire_audio(
-            self._session_id,
-            expected_generation=self._generation,
-        )
+        if self._manage_session_lifecycle:
+            await self._registry.acquire_audio(
+                self._session_id,
+                expected_generation=self._generation,
+            )
         try:
-            await self._transition(SessionState.CONNECTING)
+            if self._manage_session_lifecycle:
+                await self._transition(SessionState.CONNECTING)
             await self._transport.open()
         except BaseException:
             await self._fail(
@@ -186,6 +190,9 @@ class GPTLiveService(FrameProcessor):
         await asyncio.shield(task)
 
     async def _close_session(self) -> None:
+        if not self._manage_session_lifecycle:
+            await self._transport.close()
+            return
         current = await self._is_current()
         try:
             if current:
@@ -291,17 +298,25 @@ class GPTLiveService(FrameProcessor):
         *,
         provider_session_id: str | None = None,
     ) -> None:
-        snapshot = await self._registry.transition(
-            self._session_id,
-            state,
-            provider_session_id=provider_session_id,
-            expected_generation=self._generation,
-        )
+        resolved_state = state
+        if self._manage_session_lifecycle:
+            snapshot = await self._registry.transition(
+                self._session_id,
+                state,
+                provider_session_id=provider_session_id,
+                expected_generation=self._generation,
+            )
+            resolved_state = snapshot.state
         await self._event_sink(
             SessionEvent(
                 session_id=self._session_id,
                 type=SessionEventType.SESSION_STATE_CHANGED,
-                state=snapshot.state,
+                state=resolved_state,
+                metadata=(
+                    {"provider_session_id": provider_session_id}
+                    if provider_session_id is not None
+                    else {}
+                ),
             )
         )
 
@@ -316,6 +331,20 @@ class GPTLiveService(FrameProcessor):
         await asyncio.shield(task)
 
     async def _fail_session(self, error_code: str, *, message: str) -> None:
+        if not self._manage_session_lifecycle:
+            try:
+                await self._event_sink(
+                    SessionEvent(
+                        session_id=self._session_id,
+                        type=SessionEventType.ERROR,
+                        state=SessionState.FAILED,
+                        error_code=error_code,
+                        metadata={"message": message},
+                    )
+                )
+            finally:
+                await self._transport.close()
+            return
         previous = None
         snapshot = None
         try:

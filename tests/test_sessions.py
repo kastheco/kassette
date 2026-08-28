@@ -7,6 +7,7 @@ from kassette.sessions import (
     AudioDeviceBusyError,
     InvalidSessionTransitionError,
     LiveSessionCoordinator,
+    SessionGenerationMismatchError,
     SessionHandle,
     SessionRegistry,
     SessionRegistryError,
@@ -229,3 +230,43 @@ async def test_registry_rejects_unbounded_or_controlled_session_ids(session_id: 
 
     with pytest.raises(SessionRegistryError, match="invalid voice session identifier"):
         await registry.create(session_id)
+
+
+async def test_provider_switch_generation_fences_stale_adapter_callbacks() -> None:
+    registry = SessionRegistry()
+    created = await registry.create("voice", initial_provider_id="cascade")
+    await registry.transition(
+        "voice",
+        SessionState.CONNECTING,
+        expected_provider_generation=created.provider_generation,
+    )
+    await registry.transition(
+        "voice",
+        SessionState.LISTENING,
+        expected_provider_generation=created.provider_generation,
+    )
+
+    switching = await registry.begin_provider_switch(
+        "voice",
+        "quicksilver",
+        expected_provider_generation=created.provider_generation,
+    )
+    active = await registry.activate_provider(
+        "voice",
+        "quicksilver",
+        expected_provider_generation=switching.provider_generation,
+    )
+
+    with pytest.raises(SessionGenerationMismatchError):
+        await registry.transition(
+            "voice",
+            SessionState.LISTENING,
+            expected_provider_generation=created.provider_generation,
+        )
+
+    assert switching.state is SessionState.SWITCHING
+    assert switching.active_provider == "cascade"
+    assert switching.desired_provider == "quicksilver"
+    assert switching.provider_generation == created.provider_generation + 1
+    assert active.state is SessionState.CONNECTING
+    assert active.active_provider == "quicksilver"

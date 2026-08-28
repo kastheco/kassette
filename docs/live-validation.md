@@ -60,3 +60,34 @@ The KAS-731 lane added repeatable localhost runner and reconnect coverage withou
 credentials or contacting GPT-Live. Final physical-browser microphone permission, audible
 playback, barge-in, and browser-button reconnect remain supervisor evidence; they are not
 claimed by the automated fixture.
+
+## Runtime provider switching
+
+Observed on the KAS-748 working tree on 2026-08-28:
+
+```bash
+uv run pytest                  # 98 passed
+uv run ruff check .            # passed
+uv run ruff format --check .   # passed
+uv run pyright                 # 0 errors, 0 warnings, 0 informations
+```
+
+A physical Chrome SmallWebRTC client connected once with the cascaded provider. On the same
+session and open data channel it requested cascade → Quicksilver → cascade. The provider
+generation advanced from 1 → 2 → 3 while the stable Kassette session and WebRTC connection
+were retained. Quicksilver reported `provider.active` only after its delayed
+`session.started` event moved the session to `listening`. The return to cascade rebuilt
+Gemini STT and Fish TTS and also reported `provider.active` in `listening`.
+
+A `provider.list` request returned bounded capability records for both providers without
+credentials. Browser-captured events included `provider.switch.requested`,
+`provider.switching`, and `provider.active`; the switching event explicitly reported that
+no assistant speech was interrupted and no provisional transcript was discarded. The
+client then disconnected normally and the service remained active.
+
+Automated tests cover quiescent switching, forced interruption, provisional transcript
+refusal and forced discard, stale callback fencing, duplicate concurrent requests, missing
+credentials, unknown providers, replacement failure, rollback failure, readiness timeout,
+cancellation-safe rollback, client message bounds, stable audio ownership, and external
+Quicksilver lifecycle ownership. The browser used for this check had no microphone, so live
+mid-speech forced switching is not claimed beyond the deterministic test.

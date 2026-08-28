@@ -2,7 +2,7 @@
 
 kassette is a local realtime voice service built on Pipecat. It owns transient voice sessions and the audio path. Products and agent runtimes keep their own durable conversations.
 
-The default pipeline is cascaded: Gemini 3.5 Transcribe Live produces provisional and finalized owner transcripts, ClickClack commits finalized turns to its normal message API for OpenClaw, and Fish Audio streams agent responses back through the existing SmallWebRTC connection. The legacy Quicksilver GPT-Live adapter remains available as an explicit fallback.
+The default pipeline is cascaded: Gemini 3.5 Transcribe Live produces provisional and finalized owner transcripts, ClickClack commits finalized turns to its normal message API for OpenClaw, and Fish Audio streams agent responses back through the existing SmallWebRTC connection. Quicksilver GPT-Live is a second runtime-selectable adapter behind the same session and transport.
 
 ## Development
 
@@ -27,6 +27,10 @@ KASSETTE_TRANSCRIPT_GROOMING_PROFILE=/absolute/path/to/transcript-grooming.json
 ```
 
 The version 1 profile supports boundaried word overrides, whitespace normalization, optional lowercase output, and restoration of the pronoun `I`. Rules apply to interim and final transcripts, fail open to provider text, and remain upstream of TTS so grooming cannot delay audio playback. Personal vocabulary belongs in the external profile, not the repository. See [ADR 0003](docs/adr/0003-groom-transcripts-at-a-provider-neutral-seam.md).
+
+### Runtime provider switching
+
+The WebRTC data channel accepts `provider.list` and generation-fenced `provider.switch` application messages. A listening session can replace `cascade` with `quicksilver` and switch back without renegotiating WebRTC or releasing its audio lease. Forced switches interrupt current speech and explicitly report whether a provisional owner transcript was discarded. See [ADR 0004](docs/adr/0004-switch-providers-behind-a-stable-session.md) for the message contract and rollback behavior.
 
 Generate the same sample through Eleven Flash v2.5, Eleven v3 Conversational, Fish S2.1 Pro Free, and Fish S2.1 Pro with:
 
@@ -60,7 +64,9 @@ Included now:
 - optional provider-neutral transcript grooming through external profiles
 - Fish Audio streaming TTS for agent responses
 - local on-demand WAV generation for message playback through `POST /api/tts`
-- GPT-Live behind an isolated, opt-in Quicksilver adapter
+- GPT-Live behind an isolated Quicksilver adapter
+- generation-fenced runtime switching between cascade and Quicksilver
+- provider capability discovery, readiness timeout, rollback, and content-free diagnostics
 - interruption and clean session shutdown
 
 Not included yet:
@@ -68,7 +74,6 @@ Not included yet:
 - durable state or product-specific clients
 - server-owned durable conversation state
 - remote ingress, TLS, or TURN
-- provider hot swap
 - daemon installation and upgrades
 - custom voices
 

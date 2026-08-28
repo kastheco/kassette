@@ -19,13 +19,16 @@ from pipecat.processors.audio.vad_processor import VADProcessor
 from pipecat.runner.types import RunnerArguments, SmallWebRTCRunnerArguments
 from pipecat.runner.utils import create_transport  # pyright: ignore[reportUnknownVariableType]
 from pipecat.services.fish.tts import FishAudioTTSService
-from pipecat.services.google.gemini_live.stt import GeminiSTTService
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.workers.runner import WorkerRunner
 
 from kassette.credentials import CodexCredentialProvider, PiAuthCredentialProvider
 from kassette.diagnostics import LifecycleDiagnostics
 from kassette.domain import SessionEvent, SessionEventType, SessionState
+from kassette.providers.builtin import (
+    PausableGeminiSTTService,
+    build_builtin_provider_registry,
+)
 from kassette.providers.cascade import (
     CascadedBargeInProcessor,
     CascadedVoiceEvents,
@@ -33,6 +36,7 @@ from kassette.providers.cascade import (
 )
 from kassette.providers.quicksilver.service import GPTLiveService, TransportFactory
 from kassette.providers.quicksilver.transport import QuicksilverTransport
+from kassette.providers.runtime import VoiceProviderRuntime
 from kassette.sessions import (
     LiveSessionCoordinator,
     SessionHandle,
@@ -48,35 +52,6 @@ from kassette.transcript_grooming import (
 _registry = SessionRegistry()
 _lifecycle = LiveSessionCoordinator()
 _diagnostics = LifecycleDiagnostics()
-
-
-class _PausableGeminiSTTService(GeminiSTTService):
-    """Suspend billable Gemini audio while the WebRTC output session stays alive."""
-
-    _INPUT_PAUSE_GRACE_SECS = 0.2
-    _input_paused = False
-    _input_pause_lock: asyncio.Lock | None = None
-
-    def _pause_lock(self) -> asyncio.Lock:
-        if self._input_pause_lock is None:
-            self._input_pause_lock = asyncio.Lock()
-        return self._input_pause_lock
-
-    async def pause_input(self) -> None:
-        async with self._pause_lock():
-            if self._input_paused:
-                return
-            await self._send_finalization_signal()
-            await asyncio.sleep(self._INPUT_PAUSE_GRACE_SECS)
-            await self._disconnect()
-            self._input_paused = True
-
-    async def resume_input(self) -> None:
-        async with self._pause_lock():
-            if not self._input_paused:
-                return
-            await self._connect()
-            self._input_paused = False
 
 
 class _SessionCloser:
@@ -263,7 +238,7 @@ async def run_cascaded_session(
             params=VADParams(stop_secs=settings.vad_stop_secs),
         )
     )
-    stt = _PausableGeminiSTTService(api_key=google_api_key, sample_rate=16_000)
+    stt = PausableGeminiSTTService(api_key=google_api_key, sample_rate=16_000)
     transcript_grooming = TranscriptGroomingProcessor(
         load_transcript_groomer(settings.transcript_grooming_profile),
         timeout_secs=settings.transcript_grooming_timeout_secs,
@@ -411,6 +386,138 @@ async def run_cascaded_session(
         await _await_finalizer(finalize)
 
 
+async def run_switchable_session(
+    transport: BaseTransport,
+    runner_args: SmallWebRTCRunnerArguments,
+    settings: KassetteSettings,
+    *,
+    registry: SessionRegistry = _registry,
+    lifecycle: LiveSessionCoordinator = _lifecycle,
+    credential_provider: CodexCredentialProvider | None = None,
+    provider_transport_factory: TransportFactory = QuicksilverTransport,
+) -> None:
+    """Run one stable WebRTC session around a replaceable provider adapter."""
+    session_id = runner_args.session_id or str(uuid4())
+    snapshot = await registry.create(
+        session_id,
+        initial_provider_id=settings.voice_backend,
+    )
+    providers = build_builtin_provider_registry(
+        settings,
+        session_registry=registry,
+        credential_provider=credential_provider,
+        quicksilver_transport_factory=provider_transport_factory,
+    )
+    runtime = VoiceProviderRuntime(
+        session_id=session_id,
+        session_generation=snapshot.generation,
+        initial_provider_id=settings.voice_backend,
+        registry=registry,
+        providers=providers,
+        event_sink=_log_event,
+        name="VoiceProviderRuntime",
+    )
+    pipeline = Pipeline([transport.input(), runtime, transport.output()])
+    worker = PipelineWorker(
+        pipeline,
+        params=PipelineParams(enable_metrics=True, enable_usage_metrics=False),
+    )
+    runner = WorkerRunner(handle_sigint=False)
+    await runner.add_workers(worker)
+
+    @transport.event_handler("on_app_message")
+    async def on_app_message(
+        _transport: BaseTransport,
+        message: Any,
+        _sender: str,
+    ) -> None:
+        await runtime.handle_client_message(message)
+
+    @transport.event_handler("on_client_connected")
+    async def on_client_connected(_transport: BaseTransport, _client: Any) -> None:
+        logger.info("kassette client connected to switchable voice session {}", session_id)
+
+    async def close_state() -> None:
+        try:
+            current = await registry.get(session_id)
+            if current.state not in {SessionState.CLOSED, SessionState.FAILED}:
+                if current.state is not SessionState.CLOSING:
+                    await registry.transition(
+                        session_id,
+                        SessionState.CLOSING,
+                        expected_generation=snapshot.generation,
+                    )
+                await registry.transition(
+                    session_id,
+                    SessionState.CLOSED,
+                    expected_generation=snapshot.generation,
+                )
+        finally:
+            await registry.release_audio(
+                session_id,
+                expected_generation=snapshot.generation,
+            )
+
+    close_session = _SessionCloser(worker.cancel, close_state)
+
+    @transport.event_handler("on_client_disconnected")
+    async def on_client_disconnected(_transport: BaseTransport, _client: Any) -> None:
+        logger.info("kassette client disconnected from switchable voice session {}", session_id)
+        await close_session()
+
+    async def start_and_run() -> None:
+        await registry.acquire_audio(
+            session_id,
+            expected_generation=snapshot.generation,
+        )
+        connecting = await registry.transition(
+            session_id,
+            SessionState.CONNECTING,
+            expected_generation=snapshot.generation,
+            expected_provider_generation=snapshot.provider_generation,
+        )
+        await _log_event(
+            SessionEvent(
+                session_id=session_id,
+                type=SessionEventType.SESSION_STATE_CHANGED,
+                state=connecting.state,
+                provider_type=connecting.active_provider,
+                metadata={"provider_generation": connecting.provider_generation},
+            )
+        )
+        await runner.run()
+
+    handle = SessionHandle(session_id, snapshot.generation)
+    try:
+        previous_closed = await lifecycle.replace(handle=handle, close=close_session)
+        if not previous_closed:
+            logger.warning("kassette previous voice session cleanup failed during replacement")
+        started = await lifecycle.run_active(handle, start_and_run)
+        if not started:
+            logger.warning("kassette superseded switchable voice session did not start")
+    finally:
+
+        async def finalize() -> None:
+            try:
+                await close_session()
+            finally:
+                await lifecycle.clear(handle)
+                try:
+                    final_snapshot = await registry.get(session_id)
+                except SessionNotFoundError:
+                    final_snapshot = None
+                if final_snapshot is not None and final_snapshot.state in {
+                    SessionState.CLOSED,
+                    SessionState.FAILED,
+                }:
+                    await registry.reap(
+                        session_id,
+                        expected_generation=snapshot.generation,
+                    )
+
+        await _await_finalizer(finalize)
+
+
 async def bot(runner_args: RunnerArguments) -> None:
     """Create one kassette voice session for one SmallWebRTC client."""
     if not isinstance(runner_args, SmallWebRTCRunnerArguments):
@@ -427,10 +534,7 @@ async def bot(runner_args: RunnerArguments) -> None:
         },
     )
     settings = load_settings()
-    if settings.voice_backend == "quicksilver":
-        await run_session(transport, runner_args)
-    else:
-        await run_cascaded_session(transport, runner_args, settings)
+    await run_switchable_session(transport, runner_args, settings)
 
 
 if __name__ == "__main__":
