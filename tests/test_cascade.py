@@ -3,6 +3,7 @@ from typing import Any
 
 import pytest
 from pipecat.frames.frames import (
+    BotStartedSpeakingFrame,
     Frame,
     InterimTranscriptionFrame,
     InterruptionFrame,
@@ -197,6 +198,23 @@ async def test_user_speech_interrupts_queued_and_active_tts_before_forwarding() 
     await processor.process_frame(TTSStoppedFrame(), FrameDirection.DOWNSTREAM)
     await processor.process_frame(VADUserStartedSpeakingFrame(), FrameDirection.DOWNSTREAM)
     assert processor.interruptions == 2
+
+
+async def test_user_speech_interrupts_audio_still_playing_after_tts_generation() -> None:
+    processor = RecordingBargeInProcessor()
+    queued_frames: list[Frame] = []
+
+    async def enqueue(frame: Frame) -> None:
+        queued_frames.append(frame)
+
+    await processor.queue_speech("long response", enqueue)
+    await processor.process_frame(TTSStartedFrame(), FrameDirection.DOWNSTREAM)
+    await processor.process_frame(BotStartedSpeakingFrame(), FrameDirection.UPSTREAM)
+    await processor.process_frame(TTSStoppedFrame(), FrameDirection.DOWNSTREAM)
+    await processor.process_frame(VADUserStartedSpeakingFrame(), FrameDirection.DOWNSTREAM)
+
+    assert processor.interruptions == 1
+    assert processor.trace[-2:] == ["interrupt", "VADUserStartedSpeakingFrame"]
 
 
 async def test_transcript_and_speech_events_can_run_on_opposite_sides_of_tts() -> None:

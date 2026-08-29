@@ -6,6 +6,8 @@ from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
 from pipecat.frames.frames import (
+    BotStartedSpeakingFrame,
+    BotStoppedSpeakingFrame,
     Frame,
     InterimTranscriptionFrame,
     InterruptionFrame,
@@ -35,6 +37,7 @@ class CascadedBargeInProcessor(FrameProcessor):
         super().__init__(name=name)  # pyright: ignore[reportUnknownMemberType]
         self._queued_speech = 0
         self._active_speech = 0
+        self._playback_active = False
 
     async def queue_speech(
         self,
@@ -57,6 +60,10 @@ class CascadedBargeInProcessor(FrameProcessor):
             self._active_speech += 1
         elif isinstance(frame, TTSStoppedFrame):
             self._active_speech = max(0, self._active_speech - 1)
+        elif isinstance(frame, BotStartedSpeakingFrame):
+            self._playback_active = True
+        elif isinstance(frame, BotStoppedSpeakingFrame):
+            self._playback_active = False
         elif isinstance(frame, InterruptionFrame):
             self._reset_speech()
         elif isinstance(frame, VADUserStartedSpeakingFrame) and self._speech_pending():
@@ -66,11 +73,12 @@ class CascadedBargeInProcessor(FrameProcessor):
         await self.push_frame(frame, direction)
 
     def _speech_pending(self) -> bool:
-        return self._queued_speech > 0 or self._active_speech > 0
+        return self._queued_speech > 0 or self._active_speech > 0 or self._playback_active
 
     def _reset_speech(self) -> None:
         self._queued_speech = 0
         self._active_speech = 0
+        self._playback_active = False
 
 
 class CascadedVoiceEvents(FrameProcessor):
