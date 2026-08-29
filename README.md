@@ -1,8 +1,16 @@
 # kassette
 
+[![CI](https://github.com/kastheco/kassette/actions/workflows/ci.yml/badge.svg)](https://github.com/kastheco/kassette/actions/workflows/ci.yml)
+
 kassette is a local realtime voice service built on Pipecat. It owns transient voice sessions and the audio path. Products and agent runtimes keep their own durable conversations.
 
 The default pipeline is cascaded: Gemini 3.5 Transcribe Live produces provisional and finalized owner transcripts, ClickClack commits finalized turns to its normal message API for OpenClaw, and Fish Audio streams agent responses back through the existing SmallWebRTC connection. Quicksilver GPT-Live is a second runtime-selectable adapter behind the same session and transport.
+
+## Project status
+
+The original local voice-gateway scope is implemented and in daily use through the ClickClack Electron desktop app. ClickClack owns the durable OpenClaw conversation while kassette provides microphone input, live transcription, streamed speech, interruption, message playback, and runtime provider switching.
+
+There are no active product-roadmap phases for kassette itself. Current work is maintenance: provider compatibility, regression coverage, and changes required by upstream Pipecat or provider APIs. Mobile clients, a separate system-wide desktop overlay, Orca/orkastrator bridges, cross-device handoff, and custom-voice enrollment are not planned work.
 
 ## Development
 
@@ -20,7 +28,7 @@ Message-level playback uses `POST /api/tts` on the same local service. The endpo
 
 ### Transcript grooming
 
-Kassette defaults to preserving provider transcripts exactly. To apply fast deterministic corrections after STT and before transcript events, copy [`docs/transcript-grooming.example.json`](docs/transcript-grooming.example.json) outside the repository and set:
+kassette defaults to preserving provider transcripts exactly. To apply fast deterministic corrections after STT and before transcript events, copy [`docs/transcript-grooming.example.json`](docs/transcript-grooming.example.json) outside the repository and set:
 
 ```bash
 KASSETTE_TRANSCRIPT_GROOMING_PROFILE=/absolute/path/to/transcript-grooming.json
@@ -51,30 +59,34 @@ uv run ruff format --check .
 uv run pyright
 ```
 
-## Current boundary
+GitHub Actions runs the same checks on every push and pull request using Python 3.12.
 
-Included now:
+## Current scope
+
+Implemented:
 
 - Python 3.12 and Pipecat 1.8.0
-- identified native voice sessions
-- one local audio lease
-- localhost-only client transport
-- Gemini 3.5 Transcribe Live through Pipecat's streaming STT service
-- provider-neutral partial/final transcript events over the WebRTC data channel
-- optional provider-neutral transcript grooming through external profiles
+- ClickClack Electron and OpenClaw integration through ClickClack's normal message path
+- identified transient voice sessions with one local audio lease
+- localhost-only SmallWebRTC client transport
+- Gemini 3.5 Transcribe Live streaming STT
+- provider-neutral provisional and final transcript events
+- optional deterministic transcript grooming through external profiles
 - Fish Audio streaming TTS for agent responses
 - local on-demand WAV generation for message playback through `POST /api/tts`
-- GPT-Live behind an isolated Quicksilver adapter
-- generation-fenced runtime switching between cascade and Quicksilver
-- provider capability discovery, readiness timeout, rollback, and content-free diagnostics
-- interruption and clean session shutdown
+- GPT-Live behind the isolated Quicksilver adapter
+- generation-fenced runtime switching between cascade and Quicksilver without WebRTC renegotiation
+- provider discovery, readiness timeouts, rollback, sanitized diagnostics, interruption, and clean shutdown
+- automated reconnect, lifecycle, provider-switching, transcript, TTS, and failure-path coverage
 
-Not included yet:
+Intentionally outside kassette's scope:
 
-- durable state or product-specific clients
-- server-owned durable conversation state
+- durable conversation or product state
 - remote ingress, TLS, or TURN
-- daemon installation and upgrades
-- custom voices
+- mobile and background-audio clients
+- a separate system-wide desktop overlay or target router
+- Orca and orkastrator bridges
+- cross-device session handoff
+- custom-voice enrollment and administration
 
-Architecture: [Unified Realtime Voice Gateway](https://app.notion.com/p/3c9b3a0a9c19811494c7cabc976a27ee?pvs=204)
+The original architecture document remains useful for design context, but its phased roadmap is historical: [Unified Realtime Voice Gateway](https://app.notion.com/p/3c9b3a0a9c19811494c7cabc976a27ee?pvs=204).
