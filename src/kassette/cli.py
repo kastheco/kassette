@@ -19,11 +19,11 @@ def _loopback_url(host: str, port: int, path: str = "") -> str:
     return f"http://{authority}:{port}{path}"
 
 
-def _loopback_origin(value: str) -> str:
+def _client_origin(value: str) -> str:
     parsed = urlsplit(value)
     if (
         parsed.scheme not in {"http", "https"}
-        or parsed.hostname not in _LOOPBACK_HOSTS
+        or not parsed.hostname
         or not parsed.netloc
         or parsed.username is not None
         or parsed.password is not None
@@ -32,7 +32,7 @@ def _loopback_origin(value: str) -> str:
         or parsed.fragment
     ):
         raise typer.BadParameter(
-            "client origins must be absolute HTTP(S) loopback origins without a path",
+            "client origins must be absolute HTTP(S) origins without a path",
             param_hint="client-origin",
         )
     return f"{parsed.scheme}://{parsed.netloc}"
@@ -44,7 +44,7 @@ def serve(
     port: Annotated[int, typer.Option(help="Local service port.")] = 7860,
     client_origin: Annotated[
         list[str] | None,
-        typer.Option("--client-origin", help="Additional loopback browser origin to allow."),
+        typer.Option("--client-origin", help="Additional exact browser origin to allow."),
     ] = None,
 ) -> None:
     """Start the local kassette service."""
@@ -54,7 +54,7 @@ def serve(
             param_hint="host",
         )
     origin = _loopback_url(host, port)
-    allowed_origins = list(dict.fromkeys([origin, *map(_loopback_origin, client_origin or [])]))
+    allowed_origins = list(dict.fromkeys([origin, *map(_client_origin, client_origin or [])]))
     typer.echo(f"Starting kassette on {origin}")
     os.execv(
         sys.executable,
