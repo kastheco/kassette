@@ -25,6 +25,8 @@ uv run kassette call
 
 The local `.env` file is gitignored. `GOOGLE_API_KEY` authenticates `gemini-3.5-transcribe-live`; `FISH_API_KEY` authenticates Fish Audio `s2.1-pro`. `FISH_VOICE_ID` is optional. To use GPT transcription in cascade mode, set `KASSETTE_TRANSCRIPTION_PROVIDER=openai` and `OPENAI_API_KEY`. The default OpenAI model is `gpt-live-transcribe`, configurable through `KASSETTE_OPENAI_TRANSCRIPTION_MODEL`.
 
+The service binds a loopback address only; `serve` and `call` both reject non-loopback hosts. Browser origins are separate: `--client-origin` allowlists exact additional HTTP(S) origins, which may be non-loopback, so a trusted remote client can reach a loopback-bound listener over an existing private network path. Origins with credentials, a path, a query, or a fragment are rejected.
+
 Message-level playback uses `POST /api/tts` on the same local service. The endpoint accepts `{ "text": "..." }`, returns mono 24 kHz WAV audio, and keeps a small process-local content cache. Product clients should keep their own refresh-scoped audio cache so replay does not call the provider again.
 
 ### Transcript grooming
@@ -69,7 +71,7 @@ Implemented:
 - Python 3.12 and Pipecat 1.8.0
 - ClickClack Electron and OpenClaw integration through ClickClack's normal message path
 - identified transient voice sessions with one local audio lease
-- localhost-only SmallWebRTC client transport
+- loopback-bound SmallWebRTC listener with an explicit browser-origin allowlist
 - selectable Gemini 3.5 Transcribe Live or OpenAI GPT Live Transcribe STT
 - provider-neutral provisional and final transcript events
 - optional deterministic transcript grooming through external profiles
