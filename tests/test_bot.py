@@ -3,9 +3,16 @@
 import asyncio
 
 import pytest
+from pipecat.frames.frames import Frame, InterimTranscriptionFrame
+from pipecat.processors.frame_processor import FrameDirection
 
 from kassette.bot import _await_finalizer, _SessionCloser
-from kassette.providers.builtin import PausableGeminiSTTService
+from kassette.providers.builtin import (
+    PausableGeminiSTTService,
+    PausableOpenAIRealtimeSTTService,
+    build_cascade_stt,
+)
+from kassette.settings import KassetteSettings
 
 
 class RecordingPausableGeminiSTTService(PausableGeminiSTTService):
@@ -35,6 +42,74 @@ async def test_paused_gemini_input_disconnects_and_reconnects_idempotently() -> 
     await service.resume_input()
 
     assert service.calls == ["finalize", "disconnect", "connect"]
+
+
+class RecordingPausableOpenAIRealtimeSTTService(PausableOpenAIRealtimeSTTService):
+    _INPUT_PAUSE_GRACE_SECS = 0
+
+    def __init__(self) -> None:
+        self._input_paused = False
+        self._input_pause_lock = None
+        self._utterance_active = True
+        self._transcript_deltas = {}
+        self._user_id = "owner"
+        self.calls: list[str] = []
+        self.pushed_frames: list[Frame] = []
+
+    async def _commit_audio_buffer(self) -> None:
+        self.calls.append("commit")
+
+    async def _disconnect(self) -> None:
+        self.calls.append("disconnect")
+
+    async def _connect(self) -> None:
+        self.calls.append("connect")
+
+    async def push_frame(
+        self,
+        frame: Frame,
+        direction: FrameDirection = FrameDirection.DOWNSTREAM,
+    ) -> None:
+        self.pushed_frames.append(frame)
+
+
+async def test_paused_openai_realtime_input_disconnects_and_reconnects_idempotently() -> None:
+    service = RecordingPausableOpenAIRealtimeSTTService()
+
+    await service.pause_input()
+    await service.pause_input()
+    await service.resume_input()
+    await service.resume_input()
+
+    assert service.calls == ["commit", "disconnect", "connect"]
+
+
+async def test_openai_realtime_deltas_are_published_as_cumulative_interims() -> None:
+    service = RecordingPausableOpenAIRealtimeSTTService()
+
+    await service._handle_transcription_delta({"item_id": "turn-1", "delta": "hello"})
+    await service._handle_transcription_delta({"item_id": "turn-1", "delta": " there"})
+
+    assert [
+        frame.text
+        for frame in service.pushed_frames
+        if isinstance(frame, InterimTranscriptionFrame)
+    ] == ["hello", "hello there"]
+
+
+def test_openai_cascade_uses_gpt_live_transcribe() -> None:
+    settings = KassetteSettings.model_validate(
+        {
+            "KASSETTE_TRANSCRIPTION_PROVIDER": "openai",
+            "OPENAI_API_KEY": "test-key",
+            "FISH_API_KEY": "fish-key",
+        }
+    )
+
+    service = build_cascade_stt(settings, "test-key")
+
+    assert isinstance(service, PausableOpenAIRealtimeSTTService)
+    assert service._settings.model == "gpt-live-transcribe"
 
 
 async def test_session_cleanup_is_attempted_once_after_failure() -> None:

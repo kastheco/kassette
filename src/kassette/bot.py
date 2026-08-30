@@ -25,10 +25,7 @@ from pipecat.workers.runner import WorkerRunner
 from kassette.credentials import CodexCredentialProvider, PiAuthCredentialProvider
 from kassette.diagnostics import LifecycleDiagnostics
 from kassette.domain import SessionEvent, SessionEventType, SessionState
-from kassette.providers.builtin import (
-    PausableGeminiSTTService,
-    build_builtin_provider_registry,
-)
+from kassette.providers.builtin import build_builtin_provider_registry, build_cascade_stt
 from kassette.providers.cascade import (
     CascadedBargeInProcessor,
     CascadedVoiceEvents,
@@ -212,8 +209,8 @@ async def run_cascaded_session(
     registry: SessionRegistry = _registry,
     lifecycle: LiveSessionCoordinator = _lifecycle,
 ) -> None:
-    """Run Gemini transcription and Fish TTS around ClickClack's agent loop."""
-    google_api_key, fish_api_key = settings.cascade_credentials()
+    """Run the selected transcription provider and Fish TTS around ClickClack's loop."""
+    transcription_api_key, fish_api_key = settings.cascade_credentials()
     session_id = runner_args.session_id or str(uuid4())
     snapshot = await registry.create(session_id)
 
@@ -238,7 +235,7 @@ async def run_cascaded_session(
             params=VADParams(stop_secs=settings.vad_stop_secs),
         )
     )
-    stt = PausableGeminiSTTService(api_key=google_api_key, sample_rate=16_000)
+    stt = build_cascade_stt(settings, transcription_api_key)
     transcript_grooming = TranscriptGroomingProcessor(
         load_transcript_groomer(settings.transcript_grooming_profile),
         timeout_secs=settings.transcript_grooming_timeout_secs,

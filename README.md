@@ -4,7 +4,7 @@
 
 kassette is a local realtime voice service built on Pipecat. It owns transient voice sessions and the audio path. Products and agent runtimes keep their own durable conversations.
 
-The default pipeline is cascaded: Gemini 3.5 Transcribe Live produces provisional and finalized owner transcripts, ClickClack commits finalized turns to its normal message API for OpenClaw, and Fish Audio streams agent responses back through the existing SmallWebRTC connection. Quicksilver GPT-Live is a second runtime-selectable adapter behind the same session and transport.
+The default pipeline is cascaded: Gemini 3.5 Transcribe Live produces provisional and finalized owner transcripts, ClickClack commits finalized turns to its normal message API for OpenClaw, and Fish Audio streams agent responses back through the existing SmallWebRTC connection. Cascade mode can instead use OpenAI's low-latency `gpt-live-transcribe` model for streaming transcripts. Quicksilver GPT-Live is a second runtime-selectable adapter behind the same session and transport.
 
 ## Project status
 
@@ -18,11 +18,12 @@ There are no active product-roadmap phases for kassette itself. Current work is 
 uv sync
 cp .env.example .env
 # Add GOOGLE_API_KEY and FISH_API_KEY to .env.
+# Or select OpenAI transcription and add OPENAI_API_KEY instead.
 uv run kassette serve --client-origin http://127.0.0.1:5173
 uv run kassette call
 ```
 
-The local `.env` file is gitignored. `GOOGLE_API_KEY` authenticates `gemini-3.5-transcribe-live`; `FISH_API_KEY` authenticates Fish Audio `s2.1-pro`. `FISH_VOICE_ID` is optional.
+The local `.env` file is gitignored. `GOOGLE_API_KEY` authenticates `gemini-3.5-transcribe-live`; `FISH_API_KEY` authenticates Fish Audio `s2.1-pro`. `FISH_VOICE_ID` is optional. To use GPT transcription in cascade mode, set `KASSETTE_TRANSCRIPTION_PROVIDER=openai` and `OPENAI_API_KEY`. The default OpenAI model is `gpt-live-transcribe`, configurable through `KASSETTE_OPENAI_TRANSCRIPTION_MODEL`.
 
 Message-level playback uses `POST /api/tts` on the same local service. The endpoint accepts `{ "text": "..." }`, returns mono 24 kHz WAV audio, and keeps a small process-local content cache. Product clients should keep their own refresh-scoped audio cache so replay does not call the provider again.
 
@@ -69,7 +70,7 @@ Implemented:
 - ClickClack Electron and OpenClaw integration through ClickClack's normal message path
 - identified transient voice sessions with one local audio lease
 - localhost-only SmallWebRTC client transport
-- Gemini 3.5 Transcribe Live streaming STT
+- selectable Gemini 3.5 Transcribe Live or OpenAI GPT Live Transcribe STT
 - provider-neutral provisional and final transcript events
 - optional deterministic transcript grooming through external profiles
 - Fish Audio streaming TTS for agent responses

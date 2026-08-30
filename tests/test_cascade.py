@@ -296,12 +296,44 @@ def test_settings_default_vad_stop_secs(
     assert settings.transcript_grooming_timeout_secs == 0.5
 
 
+def test_settings_select_openai_transcription_for_cascade(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in (
+        "KASSETTE_TRANSCRIPTION_PROVIDER",
+        "KASSETTE_OPENAI_TRANSCRIPTION_MODEL",
+        "OPENAI_API_KEY",
+        "FISH_API_KEY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "KASSETTE_TRANSCRIPTION_PROVIDER=openai\n"
+        "KASSETTE_OPENAI_TRANSCRIPTION_MODEL=gpt-live-transcribe\n"
+        "OPENAI_API_KEY=openai-secret\n"
+        "FISH_API_KEY=fish-secret\n",
+        encoding="utf-8",
+    )
+
+    settings = load_settings(env_file=env_file)
+
+    transcription_key, fish_key = settings.cascade_credentials()
+    assert settings.transcription_provider == "openai"
+    assert settings.openai_transcription_model == "gpt-live-transcribe"
+    assert transcription_key == "openai-secret"
+    assert fish_key == "fish-secret"
+    assert "openai-secret" not in repr(settings)
+
+
 def test_settings_load_gitignored_dotenv_without_exposing_secrets(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     for name in (
         "GOOGLE_API_KEY",
+        "OPENAI_API_KEY",
         "FISH_API_KEY",
         "FISH_MODEL",
         "FISH_VOICE_ID",

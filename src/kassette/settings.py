@@ -37,10 +37,24 @@ class KassetteSettings(BaseSettings):
         le=10,
         validation_alias="KASSETTE_TRANSCRIPT_GROOMING_TIMEOUT_SECS",
     )
+    transcription_provider: Literal["gemini", "openai"] = Field(
+        default="gemini",
+        validation_alias="KASSETTE_TRANSCRIPTION_PROVIDER",
+    )
     google_api_key: SecretStr | None = Field(
         default=None,
         min_length=1,
         validation_alias="GOOGLE_API_KEY",
+    )
+    openai_api_key: SecretStr | None = Field(
+        default=None,
+        min_length=1,
+        validation_alias="OPENAI_API_KEY",
+    )
+    openai_transcription_model: str = Field(
+        default="gpt-live-transcribe",
+        min_length=1,
+        validation_alias="KASSETTE_OPENAI_TRANSCRIPTION_MODEL",
     )
     fish_api_key: SecretStr | None = Field(
         default=None,
@@ -73,14 +87,19 @@ class KassetteSettings(BaseSettings):
             raise RuntimeError("FISH_API_KEY is required for text-to-speech")
         return self.fish_api_key.get_secret_value()
 
+    def transcription_credential(self) -> str:
+        """Return the selected cascade transcription provider's secret."""
+        if self.transcription_provider == "gemini":
+            if self.google_api_key is None:
+                raise RuntimeError("GOOGLE_API_KEY is required for Gemini transcription")
+            return self.google_api_key.get_secret_value()
+        if self.openai_api_key is None:
+            raise RuntimeError("OPENAI_API_KEY is required for OpenAI transcription")
+        return self.openai_api_key.get_secret_value()
+
     def cascade_credentials(self) -> tuple[str, str]:
         """Return provider secrets only when the cascaded backend needs them."""
-        if self.google_api_key is None:
-            raise RuntimeError("GOOGLE_API_KEY is required for cascaded voice")
-        return (
-            self.google_api_key.get_secret_value(),
-            self.fish_credential(),
-        )
+        return self.transcription_credential(), self.fish_credential()
 
     def comparison_credentials(self) -> tuple[str, str, str]:
         """Return the credentials needed by the three-way TTS comparison."""

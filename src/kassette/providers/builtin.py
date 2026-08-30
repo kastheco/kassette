@@ -7,9 +7,12 @@ from typing import Any
 
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams
+from pipecat.frames.frames import Frame, VADUserStartedSpeakingFrame, VADUserStoppedSpeakingFrame
 from pipecat.processors.audio.vad_processor import VADProcessor
+from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.fish.tts import FishAudioTTSService
 from pipecat.services.google.gemini_live.stt import GeminiSTTService
+from pipecat.services.openai.stt import OpenAIRealtimeSTTService
 
 from kassette.credentials import CodexCredentialProvider, PiAuthCredentialProvider
 from kassette.providers.cascade import (
@@ -34,6 +37,77 @@ from kassette.transcript_grooming import (
     TranscriptGroomingProcessor,
     load_transcript_groomer,
 )
+
+
+class PausableOpenAIRealtimeSTTService(OpenAIRealtimeSTTService):
+    """OpenAI realtime STT adapter with pausing and cumulative interim transcripts."""
+
+    _INPUT_PAUSE_GRACE_SECS = 0.2
+    _input_paused = False
+    _input_pause_lock: asyncio.Lock | None = None
+    _utterance_active = False
+    _transcript_deltas: dict[str, str]
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        sample_rate: int,
+        settings: OpenAIRealtimeSTTService.Settings,
+    ) -> None:
+        super().__init__(  # pyright: ignore[reportUnknownMemberType]
+            api_key=api_key,
+            sample_rate=sample_rate,
+            settings=settings,
+        )
+        self._transcript_deltas = {}
+
+    def _pause_lock(self) -> asyncio.Lock:
+        if self._input_pause_lock is None:
+            self._input_pause_lock = asyncio.Lock()
+        return self._input_pause_lock
+
+    async def pause_input(self) -> None:
+        async with self._pause_lock():
+            if self._input_paused:
+                return
+            if self._utterance_active:
+                await self._commit_audio_buffer()
+                self._utterance_active = False
+            await asyncio.sleep(self._INPUT_PAUSE_GRACE_SECS)
+            await self._disconnect()
+            self._transcript_deltas.clear()
+            self._input_paused = True
+
+    async def resume_input(self) -> None:
+        async with self._pause_lock():
+            if not self._input_paused:
+                return
+            await self._connect()
+            self._input_paused = False
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
+        if isinstance(frame, VADUserStartedSpeakingFrame):
+            self._utterance_active = True
+        await super().process_frame(frame, direction)
+        if isinstance(frame, VADUserStoppedSpeakingFrame):
+            self._utterance_active = False
+
+    async def _handle_transcription_delta(self, evt: dict[str, Any]) -> None:
+        item_id = str(evt.get("item_id", ""))
+        cumulative = self._transcript_deltas.get(item_id, "") + str(evt.get("delta", ""))
+        self._transcript_deltas[item_id] = cumulative
+        await super()._handle_transcription_delta(  # pyright: ignore[reportUnknownMemberType]
+            {**evt, "delta": cumulative}
+        )
+
+    async def _handle_transcription_completed(self, evt: dict[str, Any]) -> None:
+        try:
+            await super()._handle_transcription_completed(  # pyright: ignore[reportUnknownMemberType]
+                evt
+            )
+        finally:
+            self._transcript_deltas.pop(str(evt.get("item_id", "")), None)
 
 
 class PausableGeminiSTTService(GeminiSTTService):
@@ -65,6 +139,22 @@ class PausableGeminiSTTService(GeminiSTTService):
             self._input_paused = False
 
 
+def build_cascade_stt(
+    settings: KassetteSettings,
+    api_key: str,
+) -> PausableGeminiSTTService | PausableOpenAIRealtimeSTTService:
+    """Build the configured cascade transcription service."""
+    if settings.transcription_provider == "openai":
+        return PausableOpenAIRealtimeSTTService(
+            api_key=api_key,
+            sample_rate=16_000,
+            settings=OpenAIRealtimeSTTService.Settings(
+                model=settings.openai_transcription_model,
+            ),
+        )
+    return PausableGeminiSTTService(api_key=api_key, sample_rate=16_000)
+
+
 def build_builtin_provider_registry(
     settings: KassetteSettings,
     *,
@@ -73,21 +163,26 @@ def build_builtin_provider_registry(
     quicksilver_transport_factory: TransportFactory = QuicksilverTransport,
 ) -> VoiceProviderRegistry:
     """Build the two real provider adapters behind one runtime registry."""
+    transcription_key_available = (
+        settings.google_api_key is not None
+        if settings.transcription_provider == "gemini"
+        else settings.openai_api_key is not None
+    )
     cascade_readiness = (
         CredentialReadiness.READY
-        if settings.google_api_key is not None and settings.fish_api_key is not None
+        if transcription_key_available and settings.fish_api_key is not None
         else CredentialReadiness.MISSING
     )
     quicksilver_credentials = credential_provider or PiAuthCredentialProvider()
 
     def build_cascade(context: VoiceProviderBuildContext) -> PipelineProviderAdapter:
-        google_api_key, fish_api_key = settings.cascade_credentials()
+        transcription_api_key, fish_api_key = settings.cascade_credentials()
         vad = VADProcessor(
             vad_analyzer=SileroVADAnalyzer(
                 params=VADParams(stop_secs=settings.vad_stop_secs),
             )
         )
-        stt = PausableGeminiSTTService(api_key=google_api_key, sample_rate=16_000)
+        stt = build_cascade_stt(settings, transcription_api_key)
         grooming = TranscriptGroomingProcessor(
             load_transcript_groomer(settings.transcript_grooming_profile),
             timeout_secs=settings.transcript_grooming_timeout_secs,

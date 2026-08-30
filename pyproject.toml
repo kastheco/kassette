@@ -9,7 +9,7 @@ dependencies = [
   "aiortc==1.15.0",
   "av==17.1.0",
   "google-genai>=2.9.0,<3",
-  "pipecat-ai[fish,google,runner,webrtc]==1.8.0",
+  "pipecat-ai[fish,google,openai,runner,webrtc]==1.8.0",
   "pydantic-settings==2.15.0",
   "typer==0.27.1",
 ]

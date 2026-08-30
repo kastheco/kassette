@@ -793,7 +793,7 @@ requires-dist = [
     { name = "aiortc", specifier = "==1.15.0" },
     { name = "av", specifier = "==17.1.0" },
     { name = "google-genai", specifier = ">=2.9.0,<3" },
-    { name = "pipecat-ai", extras = ["fish", "google", "runner", "webrtc"], specifier = "==1.8.0" },
+    { name = "pipecat-ai", extras = ["fish", "google", "openai", "runner", "webrtc"], specifier = "==1.8.0" },
     { name = "pydantic-settings", specifier = "==2.15.0" },
     { name = "typer", specifier = "==0.27.1" },
 ]
