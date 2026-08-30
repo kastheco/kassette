@@ -209,6 +209,10 @@ async def run_terminal_voice_session(
             session.closed.set()
 
     async def event_sink(event: SessionEvent) -> None:
+        if event.type is SessionEventType.SPEECH_STARTED:
+            await input_processor.set_output_active(True)
+        elif event.type in {SessionEventType.SPEECH_STOPPED, SessionEventType.INTERRUPTED}:
+            await input_processor.set_output_active(False)
         message = session_event_envelope(event)
         if message is not None:
             await session.send(message)
@@ -268,6 +272,7 @@ async def run_terminal_voice_session(
                     envelope("output.state_changed", {"muted": output_processor.muted})
                 )
             elif message_type == "output.cancel":
+                await input_processor.set_output_active(False)
                 await runtime.process_frame(InterruptionFrame(), FrameDirection.DOWNSTREAM)
             else:
                 await runtime.handle_client_message(message)

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import struct
+from unittest.mock import AsyncMock
 
+import pytest
 from pipecat.frames.frames import InputAudioRawFrame, OutputTransportMessageUrgentFrame
 from pipecat.processors.frame_processor import FrameDirection
 
@@ -32,6 +34,33 @@ def test_pcm_level_reports_silence_and_normalized_signal() -> None:
 
     samples = struct.pack("<40h", *([16_384] * 40))
     assert pcm_level(samples) == 0.5
+
+
+async def test_output_activity_blocks_microphone_frames_until_playback_stops(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[dict[str, object]] = []
+
+    async def send(event: dict[str, object]) -> None:
+        events.append(event)
+
+    processor = TerminalInputProcessor(send)
+    push_frame = AsyncMock()
+    monkeypatch.setattr(processor, "push_frame", push_frame)
+    frame = InputAudioRawFrame(audio=b"\xff\x7f" * 40, sample_rate=16_000, num_channels=1)
+
+    await processor.set_output_active(True)
+    await processor.process_frame(frame, FrameDirection.DOWNSTREAM)
+
+    assert processor.blocked
+    push_frame.assert_not_awaited()
+    assert events[-1]["data"] == {"direction": "input", "level": 0.0}
+
+    await processor.set_output_active(False)
+    await processor.process_frame(frame, FrameDirection.DOWNSTREAM)
+
+    assert not processor.blocked
+    push_frame.assert_awaited_once_with(frame, FrameDirection.DOWNSTREAM)
 
 
 async def test_paused_terminal_input_resets_level_and_suppresses_future_telemetry() -> None:

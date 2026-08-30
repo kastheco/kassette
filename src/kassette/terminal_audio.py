@@ -108,18 +108,32 @@ class TerminalInputProcessor(_LevelProcessor):
     def __init__(self, sink: EventSink) -> None:
         super().__init__("input", sink, name="TerminalInputProcessor")
         self.paused = False
+        self.output_active = False
+
+    @property
+    def blocked(self) -> bool:
+        return self.paused or self.output_active
 
     async def set_paused(self, paused: bool) -> None:
-        if self.paused == paused:
-            return
+        was_blocked = self.blocked
         self.paused = paused
-        if paused:
+        await self._publish_blocked_transition(was_blocked)
+
+    async def set_output_active(self, active: bool) -> None:
+        was_blocked = self.blocked
+        self.output_active = active
+        await self._publish_blocked_transition(was_blocked)
+
+    async def _publish_blocked_transition(self, was_blocked: bool) -> None:
+        if self.blocked and not was_blocked:
             self._last_level_at = 0.0
             await self._sink(envelope("audio.level", {"direction": "input", "level": 0.0}))
 
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
         await super().process_frame(frame, direction)
-        if isinstance(frame, InputAudioRawFrame) and not self.paused:
+        if isinstance(frame, InputAudioRawFrame):
+            if self.blocked:
+                return
             await self._report(frame.audio)
         await self.push_frame(frame, direction)
 

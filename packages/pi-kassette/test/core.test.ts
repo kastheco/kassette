@@ -196,6 +196,8 @@ describe("voice surface", () => {
     expect(renderVoiceSurface(quietMic, 48, 3_010).join("\n")).toMatch(/[▂▃▄▅▆▇█]/);
 
     const speaking = reduceVoiceState(quietMic, { type: "speaking", text: "assistant reply stays in chat" });
-    expect(renderVoiceSurface(speaking, 48, 3_020).join("\n")).not.toContain("assistant reply stays in chat");
+    const speakingSurface = renderVoiceSurface(speaking, 48, 3_020).join("\n");
+    expect(speakingSurface).not.toContain("assistant reply stays in chat");
+    expect(speakingSurface).toContain("space stop");
   });
 });

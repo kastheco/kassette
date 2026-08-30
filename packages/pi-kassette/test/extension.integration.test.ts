@@ -33,6 +33,7 @@ function harness(idle = true): {
   emit: (type: string, data: Record<string, unknown>) => void;
   press: (data: string) => void;
   sentMessages: Array<[string, { deliverAs?: "steer" | "followUp" } | undefined]>;
+  getClientCommands: () => Array<[string, Record<string, unknown>]>;
   setIdle: (value: boolean) => void;
   getEditorText: () => string;
   shutdown: () => Promise<void>;
@@ -109,6 +110,7 @@ function harness(idle = true): {
     },
     press: (data) => ensureSurface().handleInput(data),
     sentMessages,
+    getClientCommands: () => client?.sent ?? [],
     setIdle: (value) => { currentlyIdle = value; },
     getEditorText: () => editorText,
     shutdown: async () => {
@@ -148,6 +150,21 @@ describe.sequential("pi-kassette extension delivery", () => {
     app.emit("transcript.final", { turn_id: "turn-2", text: "hands free message", sequence: 1 });
 
     expect(app.sentMessages).toEqual([["hands free message", { deliverAs: "steer" }]]);
+    await app.shutdown();
+  });
+
+  it("uses Space to stop playback and immediately resume listening", async () => {
+    process.env.KASSETTE_AUTO_SEND = "0";
+    const app = harness(true);
+    await app.command();
+
+    app.emit("speech.started", {});
+    app.press(" ");
+
+    expect(app.getClientCommands().slice(-2)).toEqual([
+      ["output.cancel", {}],
+      ["input.resume", {}],
+    ]);
     await app.shutdown();
   });
 

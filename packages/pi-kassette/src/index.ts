@@ -134,6 +134,13 @@ export function createPiKassette(
     const actions = {
       getState: (): VoiceState => state,
       toggleInput: () => {
+        if (state.status === "speaking") {
+          client?.send("output.cancel");
+          desiredInputPaused = false;
+          client?.send("input.resume");
+          dispatch({ type: "input-resumed" });
+          return;
+        }
         desiredInputPaused = !desiredInputPaused;
         client?.send(desiredInputPaused ? "input.pause" : "input.resume");
       },
