@@ -54,6 +54,12 @@ export class TranscriptDraft {
     return text;
   }
 
+  consumeAll(): string {
+    const text = this.text;
+    this.clear();
+    return text;
+  }
+
   clear(): void {
     this.turns.clear();
     this.order.length = 0;

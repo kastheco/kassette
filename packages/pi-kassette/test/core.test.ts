@@ -57,6 +57,15 @@ describe("transcript draft", () => {
     expect(draft.consume()).toBe("hello");
     expect(draft.text).toBe("");
   });
+
+  it("can submit or preserve the visible interim transcript", () => {
+    const draft = new TranscriptDraft();
+    draft.update({ turnId: "a", text: "still transcribing", sequence: 1, final: false });
+
+    expect(draft.finalizedText).toBe("");
+    expect(draft.consumeAll()).toBe("still transcribing");
+    expect(draft.text).toBe("");
+  });
 });
 
 describe("Pi turn delivery", () => {
@@ -120,11 +129,12 @@ describe("voice surface keys", () => {
       interrupt: () => calls.push("interrupt"),
       exit: () => calls.push("exit"),
     };
+    expect(dispatchVoiceSurfaceInput(voiceSurfaceInput("\r", false), actions, () => false)).toBe(true);
     expect(dispatchVoiceSurfaceInput("extension", actions, () => {
       calls.push("extension");
       return true;
     })).toBe(true);
-    expect(calls).toEqual(["extension"]);
+    expect(calls).toEqual(["submit", "extension"]);
   });
 });
 

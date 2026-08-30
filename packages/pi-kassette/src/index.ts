@@ -29,13 +29,13 @@ export default function piKassette(pi: ExtensionAPI): void {
   };
 
   const submit = (): void => {
-    if (!draft.finalizedText || !ctx) return;
+    if (!draft.text || !ctx) return;
     const delivery = transcriptDelivery(ctx.isIdle(), bargedIn);
     if (delivery === "hold") {
       ctx.ui.notify("Pi is busy. Your transcript is still in the voice draft.", "warning");
       return;
     }
-    const text = draft.consume();
+    const text = draft.consumeAll();
     dispatch({ type: "transcript", text: "", final: true });
     dispatch({ type: "thinking" });
     if (delivery === "normal") pi.sendUserMessage(text);
@@ -91,7 +91,7 @@ export default function piKassette(pi: ExtensionAPI): void {
 
   const exit = async (): Promise<void> => {
     if (!active || !ctx) return;
-    const text = draft.finalizedText;
+    const text = draft.text;
     active = false;
     await client?.close();
     client = undefined;
