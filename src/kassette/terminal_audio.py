@@ -87,7 +87,13 @@ class TerminalOutputProcessor(_LevelProcessor):
         if isinstance(frame, OutputTransportMessageUrgentFrame):
             message = frame.message
             if isinstance(message, dict):
-                await self._sink(cast(dict[str, Any], message))
+                candidate = cast(dict[str, object], message)
+                if (
+                    candidate.get("label") == "kassette"
+                    and isinstance(candidate.get("type"), str)
+                    and isinstance(candidate.get("data"), dict)
+                ):
+                    await self._sink(cast(dict[str, Any], candidate))
             return
         if isinstance(frame, OutputAudioRawFrame):
             await self._report(frame.audio)

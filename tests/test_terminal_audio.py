@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import struct
 
-from pipecat.frames.frames import InputAudioRawFrame
+from pipecat.frames.frames import InputAudioRawFrame, OutputTransportMessageUrgentFrame
 from pipecat.processors.frame_processor import FrameDirection
 
-from kassette.terminal_audio import TerminalInputProcessor, pcm_level
+from kassette.terminal_audio import TerminalInputProcessor, TerminalOutputProcessor, pcm_level
 
 
 def test_pcm_level_reports_silence_and_normalized_signal() -> None:
@@ -40,6 +40,29 @@ async def test_paused_terminal_input_resets_level_and_suppresses_future_telemetr
         FrameDirection.DOWNSTREAM,
     )
     assert events == []
+
+
+async def test_terminal_output_forwards_only_kassette_envelopes() -> None:
+    events: list[dict[str, object]] = []
+
+    async def send(event: dict[str, object]) -> None:
+        events.append(event)
+
+    processor = TerminalOutputProcessor(send)
+    await processor.process_frame(
+        OutputTransportMessageUrgentFrame(
+            message={"label": "rtvi-ai", "type": "metrics", "data": {}}
+        ),
+        FrameDirection.DOWNSTREAM,
+    )
+    await processor.process_frame(
+        OutputTransportMessageUrgentFrame(
+            message={"label": "kassette", "type": "speech.started", "data": {}}
+        ),
+        FrameDirection.DOWNSTREAM,
+    )
+
+    assert events == [{"label": "kassette", "type": "speech.started", "data": {}}]
 
 
 def test_pcm_level_clamps_full_scale() -> None:
