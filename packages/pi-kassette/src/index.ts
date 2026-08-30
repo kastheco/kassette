@@ -67,6 +67,13 @@ export default function piKassette(pi: ExtensionAPI): void {
       }
     } else if (message.type === "speech.started") {
       dispatch({ type: "speaking", text: responseCaption });
+    } else if (message.type === "speech.stopped") {
+      dispatch({ type: "listening" });
+    } else if (message.type === "session.state_changed") {
+      if (data.state === "listening") dispatch({ type: "listening" });
+      else if (data.state === "speaking") dispatch({ type: "speaking", text: responseCaption });
+      else if (data.state === "interrupting") dispatch({ type: "interrupted" });
+      else if (data.state === "failed") dispatch({ type: "failed", error: "Kassette failed" });
     } else if (message.type === "session.interrupted") {
       bargedIn = interruptForBargeIn(
         () => ctx?.abort(),
@@ -76,7 +83,6 @@ export default function piKassette(pi: ExtensionAPI): void {
       dispatch({ type: "interrupted" });
     } else if (message.type === "input.state_changed") {
       inputPaused = data.paused === true;
-      desiredInputPaused = inputPaused;
       dispatch({ type: inputPaused ? "input-paused" : "input-resumed" });
     } else if (message.type === "session.error") {
       dispatch({ type: "failed", error: typeof data.message === "string" ? data.message : "Kassette failed" });

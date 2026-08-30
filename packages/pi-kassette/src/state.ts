@@ -14,6 +14,7 @@ export type VoiceAction =
   | { type: "connected" }
   | { type: "input-paused" }
   | { type: "input-resumed" }
+  | { type: "listening" }
   | { type: "level"; direction: "input" | "output"; level: number; at?: number }
   | { type: "transcript"; text: string; final: boolean }
   | { type: "thinking" }
@@ -33,12 +34,17 @@ export function reduceVoiceState(state: VoiceState, action: VoiceAction): VoiceS
     case "connected": return state;
     case "input-paused": return { ...state, status: "mic paused", inputLevel: 0 };
     case "input-resumed": return { ...state, status: "listening" };
+    case "listening": return state.status === "mic paused" ? state : { ...state, status: "listening", outputLevel: 0 };
     case "level": return {
       ...state,
       [action.direction === "input" ? "inputLevel" : "outputLevel"]: Math.max(0, Math.min(1, action.level)),
       ...(action.direction === "input" ? { lastInputLevelAt: action.at ?? Date.now() } : {}),
     };
-    case "transcript": return { ...state, status: action.final ? "listening" : "transcribing", transcript: action.text };
+    case "transcript": return {
+      ...state,
+      status: state.status === "mic paused" ? "mic paused" : action.final ? "listening" : "transcribing",
+      transcript: action.text,
+    };
     case "thinking": return { ...state, status: "thinking", response: "" };
     case "speaking": return { ...state, status: "speaking", response: action.text };
     case "interrupted": return { ...state, status: "interrupted", outputLevel: 0 };
