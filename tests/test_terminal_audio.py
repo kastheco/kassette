@@ -5,7 +5,26 @@ import struct
 from pipecat.frames.frames import InputAudioRawFrame, OutputTransportMessageUrgentFrame
 from pipecat.processors.frame_processor import FrameDirection
 
-from kassette.terminal_audio import TerminalInputProcessor, TerminalOutputProcessor, pcm_level
+from kassette.terminal_audio import (
+    TerminalInputProcessor,
+    TerminalOutputProcessor,
+    pcm_level,
+    select_audio_device_index,
+)
+
+
+def test_select_audio_device_index_prefers_stable_exact_capable_name() -> None:
+    devices = [
+        {"index": 15, "name": "pipewire", "maxInputChannels": 128, "maxOutputChannels": 128},
+        {"index": 16, "name": "pulse", "maxInputChannels": 32, "maxOutputChannels": 32},
+        {"index": 17, "name": "default", "maxInputChannels": 128, "maxOutputChannels": 128},
+        {"index": 23, "name": "Pulse Monitor", "maxInputChannels": 2, "maxOutputChannels": 0},
+    ]
+
+    assert select_audio_device_index(devices, "pulse", "input") == 16
+    assert select_audio_device_index(devices, "PULSE", "output") == 16
+    assert select_audio_device_index(devices, "monitor", "input") == 23
+    assert select_audio_device_index(devices, "missing", "output") is None
 
 
 def test_pcm_level_reports_silence_and_normalized_signal() -> None:

@@ -285,6 +285,8 @@ def test_settings_default_vad_thresholds(
     for name in (
         "KASSETTE_VAD_STOP_SECS",
         "KASSETTE_VAD_MIN_VOLUME",
+        "KASSETTE_INPUT_DEVICE_NAME",
+        "KASSETTE_OUTPUT_DEVICE_NAME",
         "KASSETTE_TRANSCRIPT_GROOMING_PROFILE",
         "KASSETTE_TRANSCRIPT_GROOMING_TIMEOUT_SECS",
     ):
@@ -356,6 +358,8 @@ def test_settings_load_gitignored_dotenv_without_exposing_secrets(
         "FISH_VOICE_ID=voice-1\n"
         "KASSETTE_VAD_STOP_SECS=1.25\n"
         "KASSETTE_VAD_MIN_VOLUME=0.2\n"
+        "KASSETTE_INPUT_DEVICE_NAME=pulse\n"
+        "KASSETTE_OUTPUT_DEVICE_NAME=pulse\n"
         "KASSETTE_TRANSCRIPT_GROOMING_PROFILE=/tmp/grooming.json\n"
         "KASSETTE_TRANSCRIPT_GROOMING_TIMEOUT_SECS=0.75\n"
         "ELEVENLABS_API_KEY=eleven-secret\n"
@@ -371,6 +375,8 @@ def test_settings_load_gitignored_dotenv_without_exposing_secrets(
     assert settings.fish_voice_id == "voice-1"
     assert settings.vad_stop_secs == 1.25
     assert settings.vad_min_volume == 0.2
+    assert settings.input_device_name == "pulse"
+    assert settings.output_device_name == "pulse"
     assert settings.transcript_grooming_profile == Path("/tmp/grooming.json")
     assert settings.transcript_grooming_timeout_secs == 0.75
     eleven_key, eleven_voice, comparison_fish_key = settings.comparison_credentials()

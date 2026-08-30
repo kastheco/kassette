@@ -6,7 +6,7 @@ import math
 from array import array
 from collections.abc import Awaitable, Callable
 from time import monotonic
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from pipecat.frames.frames import (
     Frame,
@@ -15,10 +15,59 @@ from pipecat.frames.frames import (
     OutputTransportMessageUrgentFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
+from pipecat.transports.local.audio import LocalAudioTransport, LocalAudioTransportParams
 
 from kassette.terminal_protocol import envelope
 
 EventSink = Callable[[dict[str, Any]], Awaitable[None]]
+DeviceDirection = Literal["input", "output"]
+
+
+def select_audio_device_index(
+    devices: list[dict[str, Any]],
+    requested_name: str,
+    direction: DeviceDirection,
+) -> int | None:
+    """Select a capable audio device by stable name, preferring exact matches."""
+    needle = requested_name.strip().casefold()
+    channel_key = "maxInputChannels" if direction == "input" else "maxOutputChannels"
+    capable = [device for device in devices if int(device.get(channel_key, 0)) > 0]
+    exact = [device for device in capable if str(device.get("name", "")).casefold() == needle]
+    matches = exact or [
+        device for device in capable if needle in str(device.get("name", "")).casefold()
+    ]
+    if not matches:
+        return None
+    return int(matches[0]["index"])
+
+
+class StableLocalAudioTransport(LocalAudioTransport):
+    """Resolve named devices against the same PortAudio instance that opens them."""
+
+    def __init__(
+        self,
+        params: LocalAudioTransportParams,
+        *,
+        input_name: str | None = None,
+        output_name: str | None = None,
+    ) -> None:
+        super().__init__(params)
+        if input_name is None and output_name is None:
+            return
+        devices = [
+            cast(dict[str, Any], self._pyaudio.get_device_info_by_index(index))
+            for index in range(self._pyaudio.get_device_count())
+        ]
+        if input_name is not None:
+            input_index = select_audio_device_index(devices, input_name, "input")
+            if input_index is None:
+                raise ValueError(f"input audio device not found: {input_name}")
+            self._params.input_device_index = input_index
+        if output_name is not None:
+            output_index = select_audio_device_index(devices, output_name, "output")
+            if output_index is None:
+                raise ValueError(f"output audio device not found: {output_name}")
+            self._params.output_device_index = output_index
 
 
 def pcm_level(audio: bytes) -> float:

@@ -38,10 +38,18 @@ class KassetteSettings(BaseSettings):
         ge=0,
         validation_alias="KASSETTE_INPUT_DEVICE_INDEX",
     )
+    input_device_name: str | None = Field(
+        default=None,
+        validation_alias="KASSETTE_INPUT_DEVICE_NAME",
+    )
     output_device_index: int | None = Field(
         default=None,
         ge=0,
         validation_alias="KASSETTE_OUTPUT_DEVICE_INDEX",
+    )
+    output_device_name: str | None = Field(
+        default=None,
+        validation_alias="KASSETTE_OUTPUT_DEVICE_NAME",
     )
     transcript_grooming_profile: Path | None = Field(
         default=None,

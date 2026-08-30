@@ -11,7 +11,7 @@ from pipecat.frames.frames import InterruptionFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.worker import PipelineParams, PipelineWorker
 from pipecat.processors.frame_processor import FrameDirection
-from pipecat.transports.local.audio import LocalAudioTransport, LocalAudioTransportParams
+from pipecat.transports.local.audio import LocalAudioTransportParams
 from pipecat.workers.runner import WorkerRunner
 
 from kassette.domain import SessionEvent, SessionEventType, SessionState, VoiceSessionSnapshot
@@ -25,7 +25,11 @@ from kassette.sessions import (
 )
 from kassette.settings import KassetteSettings
 from kassette.terminal_api import TerminalSession
-from kassette.terminal_audio import TerminalInputProcessor, TerminalOutputProcessor
+from kassette.terminal_audio import (
+    StableLocalAudioTransport,
+    TerminalInputProcessor,
+    TerminalOutputProcessor,
+)
 from kassette.terminal_protocol import envelope
 
 
@@ -181,7 +185,7 @@ async def run_terminal_voice_session(
 
     snapshot = await registry.create(session.session_id, initial_provider_id="cascade")
     lease = TerminalAudioLease(registry, snapshot)
-    transport = LocalAudioTransport(
+    transport = StableLocalAudioTransport(
         LocalAudioTransportParams(
             audio_in_enabled=True,
             audio_out_enabled=True,
@@ -189,7 +193,9 @@ async def run_terminal_voice_session(
             audio_out_sample_rate=24_000,
             input_device_index=settings.input_device_index,
             output_device_index=settings.output_device_index,
-        )
+        ),
+        input_name=settings.input_device_name,
+        output_name=settings.output_device_name,
     )
     input_processor = TerminalInputProcessor(session.send)
     output_processor = TerminalOutputProcessor(session.send)

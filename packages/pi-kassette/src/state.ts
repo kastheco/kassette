@@ -144,10 +144,6 @@ export function renderVoiceSurface(
     : style.muted(transcriptRaw);
   lines.push(frameLine(transcriptRaw, transcriptStyled, innerWidth, style));
 
-  if (state.response) {
-    const responseRaw = `pi   › ${tail(state.response, innerWidth - 7)}`;
-    lines.push(frameLine(responseRaw, `${style.success("pi   › ")}${style.text(tail(state.response, innerWidth - 7))}`, innerWidth, style));
-  }
   if (state.error) {
     const errorRaw = `error › ${tail(state.error, innerWidth - 7)}`;
     lines.push(frameLine(errorRaw, style.error(errorRaw), innerWidth, style));

@@ -194,5 +194,8 @@ describe("voice surface", () => {
 
     const quietMic = reduceVoiceState(state, { type: "level", direction: "input", level: 0.006, at: 3_000 });
     expect(renderVoiceSurface(quietMic, 48, 3_010).join("\n")).toMatch(/[▂▃▄▅▆▇█]/);
+
+    const speaking = reduceVoiceState(quietMic, { type: "speaking", text: "assistant reply stays in chat" });
+    expect(renderVoiceSurface(speaking, 48, 3_020).join("\n")).not.toContain("assistant reply stays in chat");
   });
 });
