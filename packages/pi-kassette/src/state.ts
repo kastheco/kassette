@@ -25,6 +25,26 @@ export type VoiceAction =
   | { type: "toggle-auto-send" }
   | { type: "toggle-output-mute" };
 
+export type VoiceSurfaceStyle = {
+  accent(text: string): string;
+  text(text: string): string;
+  muted(text: string): string;
+  success(text: string): string;
+  warning(text: string): string;
+  error(text: string): string;
+  bold(text: string): string;
+};
+
+const plainStyle: VoiceSurfaceStyle = {
+  accent: (text) => text,
+  text: (text) => text,
+  muted: (text) => text,
+  success: (text) => text,
+  warning: (text) => text,
+  error: (text) => text,
+  bold: (text) => text,
+};
+
 export function initialVoiceState(): VoiceState {
   return { status: "connecting", inputLevel: 0, outputLevel: 0, transcript: "", response: "", autoSend: false, outputMuted: false, lastInputLevelAt: 0 };
 }
@@ -55,34 +75,85 @@ export function reduceVoiceState(state: VoiceState, action: VoiceAction): VoiceS
   }
 }
 
-function waveform(level: number, width: number): string {
-  const cells = Math.max(4, Math.min(24, width - 4));
+function tail(text: string, width: number): string {
+  const normalized = text.replace(/\s+/gu, " ").trim();
+  if (normalized.length <= width) return normalized;
+  return `…${normalized.slice(-(width - 1))}`;
+}
+
+function statusColor(status: VoiceStatus, style: VoiceSurfaceStyle): (text: string) => string {
+  if (status === "failed") return style.error;
+  if (status === "listening" || status === "transcribing" || status === "speaking") return style.success;
+  if (status === "mic paused" || status === "interrupted" || status === "reconnecting") return style.warning;
+  return style.accent;
+}
+
+function spectrum(level: number, width: number, phase: number): string {
+  const cells = Math.max(12, Math.min(48, width));
   const bars = "▁▂▃▄▅▆▇█";
-  const height = Math.round(level * (bars.length - 1));
+  const boosted = Math.min(1, Math.sqrt(Math.max(0, level) * 10));
+  if (boosted < 0.025) return "·".repeat(cells);
   const center = (cells - 1) / 2;
   return Array.from({ length: cells }, (_, index) => {
     const distance = Math.abs(index - center) / Math.max(1, center);
-    return bars[Math.max(0, Math.round(height * (1 - distance * 0.65)))] ?? "▁";
+    const envelope = 0.35 + 0.65 * (1 - distance ** 1.6);
+    const ripple = 0.78 + 0.22 * Math.sin(index * 1.37 + phase);
+    const height = Math.max(1, Math.round(boosted * envelope * ripple * (bars.length - 1)));
+    return bars[height] ?? "▁";
   }).join("");
 }
 
-function tail(text: string, width: number): string {
-  if (text.length <= width) return text;
-  return `…${text.slice(-(width - 1))}`;
+function frameLine(raw: string, styled: string, innerWidth: number, style: VoiceSurfaceStyle): string {
+  const clippedRaw = raw.slice(0, innerWidth);
+  const clippedStyled = raw.length > innerWidth ? style.text(clippedRaw) : styled;
+  return `${style.accent("│")} ${clippedStyled}${" ".repeat(Math.max(0, innerWidth - clippedRaw.length))} ${style.accent("│")}`;
 }
 
-export function renderVoiceSurface(state: VoiceState, width: number, now = Date.now()): string[] {
-  const usable = Math.max(12, width);
-  const level = state.status === "speaking" ? state.outputLevel : state.inputLevel;
-  const flags = `${state.autoSend ? "AUTO-SEND" : "MANUAL"} · ${state.outputMuted ? "OUTPUT MUTED" : "OUTPUT ON"}`;
-  const lines = [` ${state.status.toUpperCase()} · ${flags}`];
+export function renderVoiceSurface(
+  state: VoiceState,
+  width: number,
+  now = Date.now(),
+  style: VoiceSurfaceStyle = plainStyle,
+): string[] {
+  const panelWidth = Math.max(28, width);
+  const innerWidth = panelWidth - 4;
+  const activeOutput = state.status === "speaking";
+  const level = activeOutput ? state.outputLevel : state.inputLevel;
   const inputActive = state.status === "listening" || state.status === "transcribing";
   const inputStale = inputActive && now - state.lastInputLevelAt > 1_500;
-  if (inputStale) lines.push(" AUDIO LEVELS STALE");
-  else if (usable >= 28) lines.push(` ${waveform(level, usable - 2)}`);
-  if (state.transcript) lines.push(` You: ${tail(state.transcript, usable - 6)}`);
-  if (state.response) lines.push(` Pi: ${tail(state.response, usable - 5)}`);
-  if (state.error) lines.push(` ${tail(state.error, usable - 2)}`);
-  lines.push(" Space mic · ⇧Space auto · Enter send · M mute · Esc text");
+  const color = statusColor(state.status, style);
+  const status = state.status.toUpperCase();
+  const dot = inputStale ? "○" : state.status === "mic paused" ? "Ⅱ" : "●";
+  const titleRaw = ` KASSETTE  ${dot} ${status} `;
+  const title = `${style.bold(style.accent(" KASSETTE "))}${color(` ${dot} ${status} `)}`;
+  const topFill = Math.max(0, panelWidth - titleRaw.length - 2);
+  const lines = [`${style.accent("╭")}${title}${style.accent("─".repeat(topFill))}${style.accent("╮")}`];
+
+  const visualRaw = inputStale ? "audio signal lost" : spectrum(level, Math.min(48, innerWidth), now / 120);
+  const visualPad = Math.max(0, Math.floor((innerWidth - visualRaw.length) / 2));
+  const visualContent = `${" ".repeat(visualPad)}${visualRaw}`;
+  lines.push(frameLine(visualContent, inputStale ? style.error(visualContent) : style.accent(visualContent), innerWidth, style));
+
+  const modeRaw = `${activeOutput ? "output" : "input"}  ${state.autoSend ? "auto-send" : "manual send"}  ·  ${state.outputMuted ? "muted" : "sound on"}`;
+  lines.push(frameLine(modeRaw, style.muted(modeRaw), innerWidth, style));
+
+  const transcriptRaw = state.transcript ? `you  › ${tail(state.transcript, innerWidth - 7)}` : state.status === "mic paused" ? "you  › mic paused" : "you  › say something…";
+  const transcriptStyled = state.transcript
+    ? `${style.accent("you  › ")}${style.text(tail(state.transcript, innerWidth - 7))}`
+    : style.muted(transcriptRaw);
+  lines.push(frameLine(transcriptRaw, transcriptStyled, innerWidth, style));
+
+  if (state.response) {
+    const responseRaw = `pi   › ${tail(state.response, innerWidth - 7)}`;
+    lines.push(frameLine(responseRaw, `${style.success("pi   › ")}${style.text(tail(state.response, innerWidth - 7))}`, innerWidth, style));
+  }
+  if (state.error) {
+    const errorRaw = `error › ${tail(state.error, innerWidth - 7)}`;
+    lines.push(frameLine(errorRaw, style.error(errorRaw), innerWidth, style));
+  }
+
+  const hintsRaw = "space mic · ⇧space auto · ↵ send · m · esc";
+  const hints = hintsRaw.slice(0, innerWidth);
+  lines.push(`${style.accent("╰─")}${style.muted(` ${hints} `)}${style.accent("─".repeat(Math.max(0, panelWidth - hints.length - 4)))}${style.accent("╯")}`);
   return lines;
 }

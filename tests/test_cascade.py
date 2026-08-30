@@ -278,12 +278,13 @@ async def test_client_voice_messages_control_tts_and_microphone_input() -> None:
     )
 
 
-def test_settings_default_vad_stop_secs(
+def test_settings_default_vad_thresholds(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     for name in (
         "KASSETTE_VAD_STOP_SECS",
+        "KASSETTE_VAD_MIN_VOLUME",
         "KASSETTE_TRANSCRIPT_GROOMING_PROFILE",
         "KASSETTE_TRANSCRIPT_GROOMING_TIMEOUT_SECS",
     ):
@@ -292,6 +293,7 @@ def test_settings_default_vad_stop_secs(
     settings = load_settings(env_file=tmp_path / "missing.env")
 
     assert settings.vad_stop_secs == 1.8
+    assert settings.vad_min_volume == 0.1
     assert settings.transcript_grooming_profile is None
     assert settings.transcript_grooming_timeout_secs == 0.5
 
@@ -338,6 +340,7 @@ def test_settings_load_gitignored_dotenv_without_exposing_secrets(
         "FISH_MODEL",
         "FISH_VOICE_ID",
         "KASSETTE_VAD_STOP_SECS",
+        "KASSETTE_VAD_MIN_VOLUME",
         "KASSETTE_TRANSCRIPT_GROOMING_PROFILE",
         "KASSETTE_TRANSCRIPT_GROOMING_TIMEOUT_SECS",
         "ELEVENLABS_API_KEY",
@@ -352,6 +355,7 @@ def test_settings_load_gitignored_dotenv_without_exposing_secrets(
         "FISH_MODEL=s2.1-pro\n"
         "FISH_VOICE_ID=voice-1\n"
         "KASSETTE_VAD_STOP_SECS=1.25\n"
+        "KASSETTE_VAD_MIN_VOLUME=0.2\n"
         "KASSETTE_TRANSCRIPT_GROOMING_PROFILE=/tmp/grooming.json\n"
         "KASSETTE_TRANSCRIPT_GROOMING_TIMEOUT_SECS=0.75\n"
         "ELEVENLABS_API_KEY=eleven-secret\n"
@@ -366,6 +370,7 @@ def test_settings_load_gitignored_dotenv_without_exposing_secrets(
     assert fish_api_key == "fish-secret"
     assert settings.fish_voice_id == "voice-1"
     assert settings.vad_stop_secs == 1.25
+    assert settings.vad_min_volume == 0.2
     assert settings.transcript_grooming_profile == Path("/tmp/grooming.json")
     assert settings.transcript_grooming_timeout_secs == 0.75
     eleven_key, eleven_voice, comparison_fish_key = settings.comparison_credentials()

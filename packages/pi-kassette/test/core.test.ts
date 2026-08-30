@@ -159,9 +159,11 @@ describe("voice surface", () => {
     state = reduceVoiceState(state, { type: "transcript", text: "testing", final: false });
 
     const lines = renderVoiceSurface(state, 48, 1_100);
+    expect(lines[0]).toContain("╭ KASSETTE");
     expect(lines.join("\n")).toContain("TRANSCRIBING");
-    expect(lines.join("\n")).toContain("testing");
+    expect(lines.join("\n")).toContain("you  › testing");
     expect(lines.join("\n")).toMatch(/[█▆▃]/);
-    expect(renderVoiceSurface(state, 48, 2_600).join("\n")).toContain("AUDIO LEVELS STALE");
+    expect(lines.at(-1)).toContain("space mic");
+    expect(renderVoiceSurface(state, 48, 2_600).join("\n")).toContain("audio signal lost");
   });
 });

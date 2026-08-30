@@ -1,6 +1,6 @@
-import { CustomEditor, type KeybindingsManager } from "@earendil-works/pi-coding-agent";
+import { CustomEditor, type KeybindingsManager, type Theme } from "@earendil-works/pi-coding-agent";
 import { matchesKey, type EditorTheme, type TUI } from "@earendil-works/pi-tui";
-import { renderVoiceSurface, type VoiceState } from "./state.js";
+import { renderVoiceSurface, type VoiceState, type VoiceSurfaceStyle } from "./state.js";
 
 export type VoiceSurfaceInput =
   | "exit"
@@ -58,9 +58,10 @@ export class VoiceSurface extends CustomEditor {
     theme: EditorTheme,
     private readonly voiceKeybindings: KeybindingsManager,
     private readonly actions: VoiceSurfaceActions,
+    private readonly colorTheme: Theme,
   ) {
-    super(tui, theme, voiceKeybindings);
-    this.staleTimer = setInterval(() => this.tui.requestRender(), 500);
+    super(tui, theme, voiceKeybindings, { paddingX: 0 });
+    this.staleTimer = setInterval(() => this.tui.requestRender(), 80);
   }
 
   override handleInput(data: string): void {
@@ -86,6 +87,15 @@ export class VoiceSurface extends CustomEditor {
   }
 
   override render(width: number): string[] {
-    return renderVoiceSurface(this.actions.getState(), width);
+    const style: VoiceSurfaceStyle = {
+      accent: (text) => this.colorTheme.fg("accent", text),
+      text: (text) => this.colorTheme.fg("text", text),
+      muted: (text) => this.colorTheme.fg("muted", text),
+      success: (text) => this.colorTheme.fg("success", text),
+      warning: (text) => this.colorTheme.fg("warning", text),
+      error: (text) => this.colorTheme.fg("error", text),
+      bold: (text) => this.colorTheme.bold(text),
+    };
+    return renderVoiceSurface(this.actions.getState(), width, Date.now(), style);
   }
 }

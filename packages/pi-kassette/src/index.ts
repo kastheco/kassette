@@ -113,6 +113,7 @@ export default function piKassette(pi: ExtensionAPI): void {
     }
     if (active) return exit();
     active = true;
+    const colorTheme = ctx.ui.theme;
     editorBeforeVoice = ctx.ui.getEditorText();
     state = { ...initialVoiceState(), autoSend: process.env.KASSETTE_AUTO_SEND === "1", outputMuted: process.env.KASSETTE_OUTPUT_MUTED === "1" };
     const actions = {
@@ -141,7 +142,7 @@ export default function piKassette(pi: ExtensionAPI): void {
       exit: () => void exit(),
     };
     ctx.ui.setEditorComponent((tui, theme, keybindings) => {
-      surface = new VoiceSurface(tui, theme, keybindings, actions);
+      surface = new VoiceSurface(tui, theme, keybindings, actions, colorTheme);
       return surface;
     });
     client = new KassetteClient({

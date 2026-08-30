@@ -27,6 +27,12 @@ class KassetteSettings(BaseSettings):
         gt=0,
         validation_alias="KASSETTE_VAD_STOP_SECS",
     )
+    vad_min_volume: float = Field(
+        default=0.1,
+        ge=0,
+        le=1,
+        validation_alias="KASSETTE_VAD_MIN_VOLUME",
+    )
     input_device_index: int | None = Field(
         default=None,
         ge=0,

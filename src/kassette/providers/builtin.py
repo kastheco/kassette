@@ -179,7 +179,10 @@ def build_builtin_provider_registry(
         transcription_api_key, fish_api_key = settings.cascade_credentials()
         vad = VADProcessor(
             vad_analyzer=SileroVADAnalyzer(
-                params=VADParams(stop_secs=settings.vad_stop_secs),
+                params=VADParams(
+                    stop_secs=settings.vad_stop_secs,
+                    min_volume=settings.vad_min_volume,
+                ),
             )
         )
         stt = build_cascade_stt(settings, transcription_api_key)

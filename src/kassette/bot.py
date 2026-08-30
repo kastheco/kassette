@@ -232,7 +232,10 @@ async def run_cascaded_session(
 
     vad = VADProcessor(
         vad_analyzer=SileroVADAnalyzer(
-            params=VADParams(stop_secs=settings.vad_stop_secs),
+            params=VADParams(
+                stop_secs=settings.vad_stop_secs,
+                min_volume=settings.vad_min_volume,
+            ),
         )
     )
     stt = build_cascade_stt(settings, transcription_api_key)
