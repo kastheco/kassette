@@ -31,15 +31,17 @@ export default function piKassette(pi: ExtensionAPI): void {
   const submit = (): void => {
     if (!draft.text || !ctx) return;
     const delivery = transcriptDelivery(ctx.isIdle(), bargedIn);
-    if (delivery === "hold") {
-      ctx.ui.notify("Pi is busy. Your transcript is still in the voice draft.", "warning");
-      return;
-    }
     const text = draft.consumeAll();
     dispatch({ type: "transcript", text: "", final: true });
     dispatch({ type: "thinking" });
-    if (delivery === "normal") pi.sendUserMessage(text);
-    else pi.sendUserMessage(text, { deliverAs: "steer" });
+    if (delivery === "normal") {
+      pi.sendUserMessage(text);
+    } else {
+      ctx.abort();
+      speech.clear();
+      responseCaption = "";
+      pi.sendUserMessage(text, { deliverAs: "steer" });
+    }
     bargedIn = false;
   };
 
@@ -115,7 +117,7 @@ export default function piKassette(pi: ExtensionAPI): void {
     active = true;
     const colorTheme = ctx.ui.theme;
     editorBeforeVoice = ctx.ui.getEditorText();
-    state = { ...initialVoiceState(), autoSend: process.env.KASSETTE_AUTO_SEND === "1", outputMuted: process.env.KASSETTE_OUTPUT_MUTED === "1" };
+    state = { ...initialVoiceState(), autoSend: process.env.KASSETTE_AUTO_SEND !== "0", outputMuted: process.env.KASSETTE_OUTPUT_MUTED === "1" };
     const actions = {
       getState: (): VoiceState => state,
       toggleInput: () => {

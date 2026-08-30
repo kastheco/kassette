@@ -8,8 +8,10 @@ export type TranscriptUpdate = {
 export class TranscriptDraft {
   private readonly turns = new Map<string, TranscriptUpdate>();
   private readonly order: string[] = [];
+  private readonly consumedTurns = new Set<string>();
 
   update(update: TranscriptUpdate): boolean {
+    if (this.consumedTurns.has(update.turnId)) return false;
     const previous = this.turns.get(update.turnId);
     if (previous && previous.sequence >= update.sequence) return false;
     const text = update.text.trim();
@@ -56,12 +58,15 @@ export class TranscriptDraft {
 
   consumeAll(): string {
     const text = this.text;
-    this.clear();
+    for (const id of this.order) this.consumedTurns.add(id);
+    this.turns.clear();
+    this.order.length = 0;
     return text;
   }
 
   clear(): void {
     this.turns.clear();
     this.order.length = 0;
+    this.consumedTurns.clear();
   }
 }

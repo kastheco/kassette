@@ -91,7 +91,8 @@ function statusColor(status: VoiceStatus, style: VoiceSurfaceStyle): (text: stri
 function spectrum(level: number, width: number, phase: number): string {
   const cells = Math.max(12, Math.min(48, width));
   const bars = "▁▂▃▄▅▆▇█";
-  const boosted = Math.min(1, Math.sqrt(Math.max(0, level) * 10));
+  const normalized = Math.max(0, Math.min(1, (level - 0.001) / 0.02));
+  const boosted = Math.sqrt(normalized);
   if (boosted < 0.025) return "·".repeat(cells);
   const center = (cells - 1) / 2;
   return Array.from({ length: cells }, (_, index) => {

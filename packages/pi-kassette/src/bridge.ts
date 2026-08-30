@@ -1,4 +1,4 @@
-export type TranscriptDelivery = "normal" | "steer" | "hold";
+export type TranscriptDelivery = "normal" | "steer";
 
 export function interruptForBargeIn(abortPi: () => void, clearPendingSpeech: () => void): true {
   clearPendingSpeech();
@@ -7,6 +7,6 @@ export function interruptForBargeIn(abortPi: () => void, clearPendingSpeech: () 
 }
 
 export function transcriptDelivery(idle: boolean, bargedIn: boolean): TranscriptDelivery {
-  if (bargedIn) return "steer";
-  return idle ? "normal" : "hold";
+  if (bargedIn || !idle) return "steer";
+  return "normal";
 }

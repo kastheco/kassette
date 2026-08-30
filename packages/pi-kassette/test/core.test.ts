@@ -65,6 +65,8 @@ describe("transcript draft", () => {
     expect(draft.finalizedText).toBe("");
     expect(draft.consumeAll()).toBe("still transcribing");
     expect(draft.text).toBe("");
+    expect(draft.update({ turnId: "a", text: "still transcribing again", sequence: 2, final: true })).toBe(false);
+    expect(draft.text).toBe("");
   });
 });
 
@@ -79,7 +81,7 @@ describe("Pi turn delivery", () => {
     expect(actions).toEqual(["clear-speech", "abort"]);
     expect(transcriptDelivery(false, bargedIn)).toBe("steer");
     expect(transcriptDelivery(true, bargedIn)).toBe("steer");
-    expect(transcriptDelivery(false, false)).toBe("hold");
+    expect(transcriptDelivery(false, false)).toBe("steer");
     expect(transcriptDelivery(true, false)).toBe("normal");
   });
 });
@@ -175,5 +177,8 @@ describe("voice surface", () => {
     expect(lines.join("\n")).toMatch(/[█▆▃]/);
     expect(lines.at(-1)).toContain("space mic");
     expect(renderVoiceSurface(state, 48, 2_600).join("\n")).toContain("audio signal lost");
+
+    const quietMic = reduceVoiceState(state, { type: "level", direction: "input", level: 0.006, at: 3_000 });
+    expect(renderVoiceSurface(quietMic, 48, 3_010).join("\n")).toMatch(/[▂▃▄▅▆▇█]/);
   });
 });
