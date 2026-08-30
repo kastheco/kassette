@@ -1,0 +1,166 @@
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { EditorTheme, KeybindingsManager, TUI } from "@earendil-works/pi-tui";
+import { afterEach, describe, expect, it } from "vitest";
+import { createPiKassette, type PiKassetteDependencies, type VoiceClient } from "../src/index.js";
+import type { ClientOptions } from "../src/client.js";
+import type { Envelope } from "../src/protocol.js";
+import type { VoiceSurface } from "../src/ui.js";
+
+type Handler = (...args: any[]) => any;
+type EditorFactory = (tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager) => VoiceSurface;
+
+class FakeVoiceClient implements VoiceClient {
+  readonly sent: Array<[string, Record<string, unknown>]> = [];
+
+  constructor(readonly options: ClientOptions) {}
+
+  async connect(): Promise<void> {}
+
+  send(type: string, data: Record<string, unknown> = {}): boolean {
+    this.sent.push([type, data]);
+    return true;
+  }
+
+  async close(): Promise<void> {}
+
+  emit(type: string, data: Record<string, unknown>): void {
+    this.options.onMessage({ label: "kassette", type, data } as Envelope);
+  }
+}
+
+function harness(idle = true): {
+  command: () => Promise<void>;
+  emit: (type: string, data: Record<string, unknown>) => void;
+  press: (data: string) => void;
+  sentMessages: Array<[string, { deliverAs?: "steer" | "followUp" } | undefined]>;
+  setIdle: (value: boolean) => void;
+  getEditorText: () => string;
+  shutdown: () => Promise<void>;
+} {
+  const handlers = new Map<string, Handler[]>();
+  let commandHandler: Handler | undefined;
+  let editorFactory: EditorFactory | undefined;
+  let surface: VoiceSurface | undefined;
+  let client: FakeVoiceClient | undefined;
+  let editorText = "";
+  let currentlyIdle = idle;
+  const sentMessages: Array<[string, { deliverAs?: "steer" | "followUp" } | undefined]> = [];
+
+  const pi = {
+    on(type: string, handler: Handler) {
+      handlers.set(type, [...(handlers.get(type) ?? []), handler]);
+    },
+    registerCommand(_name: string, command: { handler: Handler }) {
+      commandHandler = command.handler;
+    },
+    registerShortcut() {},
+    sendUserMessage(text: string, options?: { deliverAs?: "steer" | "followUp" }) {
+      sentMessages.push([text, options]);
+    },
+  } as unknown as ExtensionAPI;
+
+  const colorTheme = {
+    fg: (_color: string, text: string) => text,
+    bold: (text: string) => text,
+  };
+  const context = {
+    hasUI: true,
+    mode: "tui",
+    isIdle: () => currentlyIdle,
+    abort: () => undefined,
+    ui: {
+      theme: colorTheme,
+      notify: () => undefined,
+      getEditorText: () => editorText,
+      setEditorText: (text: string) => { editorText = text; },
+      setEditorComponent: (factory?: EditorFactory) => {
+        editorFactory = factory;
+      },
+    },
+  } as unknown as ExtensionContext;
+  const dependencies: PiKassetteDependencies = {
+    createClient(options) {
+      client = new FakeVoiceClient(options);
+      return client;
+    },
+  };
+
+  createPiKassette(pi, dependencies);
+  for (const handler of handlers.get("session_start") ?? []) handler({}, context);
+
+  const ensureSurface = (): VoiceSurface => {
+    if (surface) return surface;
+    if (!editorFactory) throw new Error("voice editor factory was not installed");
+    const tui = { requestRender: () => undefined } as unknown as TUI;
+    const editorTheme = {} as EditorTheme;
+    const keybindings = { matches: () => false } as unknown as KeybindingsManager;
+    surface = editorFactory(tui, editorTheme, keybindings);
+    return surface;
+  };
+
+  return {
+    command: async () => {
+      if (!commandHandler) throw new Error("kassette command was not registered");
+      await commandHandler("", context);
+    },
+    emit: (type, data) => {
+      if (!client) throw new Error("voice client was not created");
+      client.emit(type, data);
+    },
+    press: (data) => ensureSurface().handleInput(data),
+    sentMessages,
+    setIdle: (value) => { currentlyIdle = value; },
+    getEditorText: () => editorText,
+    shutdown: async () => {
+      for (const handler of handlers.get("session_shutdown") ?? []) await handler({}, context);
+    },
+  };
+}
+
+const originalAutoSend = process.env.KASSETTE_AUTO_SEND;
+afterEach(() => {
+  if (originalAutoSend === undefined) delete process.env.KASSETTE_AUTO_SEND;
+  else process.env.KASSETTE_AUTO_SEND = originalAutoSend;
+});
+
+describe.sequential("pi-kassette extension delivery", () => {
+  it("submits the visible interim transcript on Enter and ignores its late final", async () => {
+    process.env.KASSETTE_AUTO_SEND = "0";
+    const app = harness(true);
+    await app.command();
+
+    app.emit("transcript.delta", { turn_id: "turn-1", text: "manual voice message", sequence: 1 });
+    app.press("\r");
+    app.emit("transcript.final", { turn_id: "turn-1", text: "manual voice message", sequence: 2 });
+
+    expect(app.sentMessages).toEqual([["manual voice message", undefined]]);
+    app.press("\u001b");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(app.getEditorText()).toBe("");
+    await app.shutdown();
+  });
+
+  it("auto-sends finalized speech and steers when Pi is busy", async () => {
+    delete process.env.KASSETTE_AUTO_SEND;
+    const app = harness(false);
+    await app.command();
+
+    app.emit("transcript.final", { turn_id: "turn-2", text: "hands free message", sequence: 1 });
+
+    expect(app.sentMessages).toEqual([["hands free message", { deliverAs: "steer" }]]);
+    await app.shutdown();
+  });
+
+  it("restores an unsent interim transcript when Escape returns to text mode", async () => {
+    process.env.KASSETTE_AUTO_SEND = "0";
+    const app = harness(true);
+    await app.command();
+
+    app.emit("transcript.delta", { turn_id: "turn-3", text: "keep this draft", sequence: 1 });
+    app.press("\u001b");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(app.getEditorText()).toBe("keep this draft");
+    await app.shutdown();
+  });
+});

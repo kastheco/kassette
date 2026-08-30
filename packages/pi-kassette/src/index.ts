@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { KeyId } from "@earendil-works/pi-tui";
 import { deliverVoiceTranscript, interruptForBargeIn, transcriptDelivery } from "./bridge.js";
-import { KassetteClient } from "./client.js";
+import { KassetteClient, type ClientOptions } from "./client.js";
 import { TranscriptDraft } from "./draft.js";
 import { mergeEditorDraft, resetVoiceBuffers } from "./lifecycle.js";
 import { SpeechChunker } from "./speech.js";
@@ -9,9 +9,21 @@ import { initialVoiceState, reduceVoiceState, type VoiceAction, type VoiceState 
 import { VoiceSurface } from "./ui.js";
 import type { Envelope } from "./protocol.js";
 
-export default function piKassette(pi: ExtensionAPI): void {
+export type VoiceClient = Pick<KassetteClient, "connect" | "send" | "close">;
+export type PiKassetteDependencies = {
+  createClient(options: ClientOptions): VoiceClient;
+};
+
+const defaultDependencies: PiKassetteDependencies = {
+  createClient: (options) => new KassetteClient(options),
+};
+
+export function createPiKassette(
+  pi: ExtensionAPI,
+  dependencies: PiKassetteDependencies = defaultDependencies,
+): void {
   let ctx: ExtensionContext | undefined;
-  let client: KassetteClient | undefined;
+  let client: VoiceClient | undefined;
   let state = initialVoiceState();
   let active = false;
   let inputPaused = false;
@@ -148,7 +160,7 @@ export default function piKassette(pi: ExtensionAPI): void {
       surface = new VoiceSurface(tui, theme, keybindings, actions, colorTheme);
       return surface;
     });
-    client = new KassetteClient({
+    client = dependencies.createClient({
       baseUrl: process.env.KASSETTE_URL ?? "http://127.0.0.1:7860",
       launchCommand: process.env.KASSETTE_COMMAND ?? "kassette serve",
       reconnectMs: Number(process.env.KASSETTE_RECONNECT_MS ?? 8_000),
@@ -184,3 +196,5 @@ export default function piKassette(pi: ExtensionAPI): void {
     responseCaption = "";
   });
 }
+
+export default createPiKassette;
