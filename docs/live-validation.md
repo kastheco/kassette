@@ -2,7 +2,18 @@
 
 ## Automated checks
 
-Observed on the committed KAS-731 lane head on 2026-08-27:
+Observed on committed revision `9bf3d415116cc0eeefdbe47ededef8a1212c8955` after adding OpenAI GPT Live Transcribe as a selectable cascade STT provider:
+
+```bash
+uv run pytest                  # 103 passed
+uv run ruff check .            # passed
+uv run ruff format --check .   # 34 files already formatted
+uv run pyright                 # 0 errors, 0 warnings, 0 informations
+```
+
+GitHub Actions run [`33286080642`](https://github.com/kastheco/kassette/actions/runs/33286080642) passed the same tests, lint, formatting, and type checks. Automated coverage verifies provider selection, cumulative OpenAI interim transcripts, pause finalization, credential isolation, and reconnect behavior without opening a paid provider session. A physical-microphone comparison between Gemini and GPT Live Transcribe has not been recorded yet.
+
+Earlier validation on the committed KAS-731 lane head on 2026-08-27:
 
 ```bash
 uv sync --locked                   # resolved 104; checked 102 packages
