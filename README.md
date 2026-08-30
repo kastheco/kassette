@@ -8,9 +8,9 @@ The default pipeline is cascaded: Gemini 3.5 Transcribe Live produces provisiona
 
 ## Project status
 
-The original local voice-gateway scope is implemented and in daily use through the ClickClack Electron desktop app. ClickClack owns the durable OpenClaw conversation while kassette provides microphone input, live transcription, streamed speech, interruption, message playback, and runtime provider switching.
+The original local voice-gateway scope is in daily use through the ClickClack Electron app. ClickClack owns the durable OpenClaw conversation while Kassette handles microphone input, live transcription, streamed speech, interruption, and playback.
 
-There are no active product-roadmap phases for kassette itself. Current work is maintenance: provider compatibility, regression coverage, and changes required by upstream Pipecat or provider APIs. Mobile clients, a separate system-wide desktop overlay, Orca/orkastrator bridges, cross-device handoff, and custom-voice enrollment are not planned work.
+The repository also includes `pi-kassette`, a Linux terminal voice client for Pi. Pi keeps its normal conversation and reasoning. Kassette owns the transient voice session and local devices.
 
 ## Development
 
@@ -28,6 +28,28 @@ The local `.env` file is gitignored. `GOOGLE_API_KEY` authenticates `gemini-3.5-
 The service binds a loopback address only; `serve` and `call` both reject non-loopback hosts. Browser origins are separate: `--client-origin` allowlists exact additional HTTP(S) origins, which may be non-loopback, so a trusted remote client can reach a loopback-bound listener over an existing private network path. Origins with credentials, a path, a query, or a fragment are rejected.
 
 Message-level playback uses `POST /api/tts` on the same local service. The endpoint accepts `{ "text": "..." }`, returns mono 24 kHz WAV audio, and keeps a small process-local content cache. Product clients should keep their own refresh-scoped audio cache so replay does not call the provider again.
+
+### Pi voice surface
+
+Install the extension from this checkout:
+
+```bash
+pi install ./packages/pi-kassette
+```
+
+Start Pi normally, then use `/kassette` or `Ctrl+Shift+V`. The voice surface starts with the mic paused. `Space` toggles the mic, `Shift+Space` toggles auto-send, `Enter` sends the current transcript, `Backspace` removes the last finished utterance, `M` mutes playback, and `Escape` returns to Pi's editor.
+
+The extension connects to `http://127.0.0.1:7860` and starts `kassette serve` when needed. Override those with `KASSETTE_URL` and `KASSETTE_COMMAND`. `KASSETTE_SHORTCUT` changes the activation binding. `KASSETTE_RECONNECT_MS`, `KASSETTE_AUTO_SEND=1`, and `KASSETTE_OUTPUT_MUTED=1` control the remaining client defaults. The service uses the system audio devices unless `KASSETTE_INPUT_DEVICE_INDEX` or `KASSETTE_OUTPUT_DEVICE_INDEX` is set.
+
+Terminal sessions are loopback-only and use a one-use random capability. Their control channel carries transcript, state, and real input/output level events. Normal logs leave transcript and response text out.
+
+Run the extension checks with:
+
+```bash
+npm ci --prefix packages/pi-kassette
+npm test --prefix packages/pi-kassette
+npm run typecheck --prefix packages/pi-kassette
+```
 
 ### Transcript grooming
 
@@ -72,6 +94,7 @@ Implemented:
 - ClickClack Electron and OpenClaw integration through ClickClack's normal message path
 - identified transient voice sessions with one local audio lease
 - loopback-bound SmallWebRTC listener with an explicit browser-origin allowlist
+- loopback terminal sessions with service-owned local audio and the Pi voice surface
 - selectable Gemini 3.5 Transcribe Live or OpenAI GPT Live Transcribe STT
 - provider-neutral provisional and final transcript events
 - optional deterministic transcript grooming through external profiles

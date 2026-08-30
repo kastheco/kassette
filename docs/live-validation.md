@@ -102,3 +102,20 @@ credentials, unknown providers, replacement failure, rollback failure, readiness
 cancellation-safe rollback, client message bounds, stable audio ownership, and external
 Quicksilver lifecycle ownership. The browser used for this check had no microphone, so live
 mid-speech forced switching is not claimed beyond the deterministic test.
+
+## Pi terminal voice
+
+Observed on the pi-kassette implementation working tree:
+
+```bash
+uv run pytest                                      # 122 passed
+uv run ruff check .                                # passed
+uv run ruff format --check .                       # 42 files already formatted
+uv run pyright                                     # 0 errors, 0 warnings
+npm test --prefix packages/pi-kassette             # 14 passed
+npm run typecheck --prefix packages/pi-kassette    # passed
+```
+
+A real service process also accepted a versioned terminal-session request on a fresh loopback port and returned a session ID, one-use capability, and WebSocket path.
+
+The physical path still needs a manual check in Pi. Enter the voice surface, resume the mic, confirm the waveform follows real input, speak through a full Pi turn, hear sentence-streamed playback, barge in, pause and resume, return to text with an unsent draft, and force one control-channel disconnect. The automated checks do not claim audible playback or working device selection on this machine.

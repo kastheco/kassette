@@ -45,3 +45,28 @@ jobs:
 
       - name: Run Pyright
         run: uv run pyright
+
+  pi-extension:
+    name: Pi extension checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: packages/pi-kassette/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci --prefix packages/pi-kassette
+
+      - name: Run tests
+        run: npm test --prefix packages/pi-kassette
+
+      - name: Run typecheck
+        run: npm run typecheck --prefix packages/pi-kassette

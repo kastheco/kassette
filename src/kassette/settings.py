@@ -27,6 +27,16 @@ class KassetteSettings(BaseSettings):
         gt=0,
         validation_alias="KASSETTE_VAD_STOP_SECS",
     )
+    input_device_index: int | None = Field(
+        default=None,
+        ge=0,
+        validation_alias="KASSETTE_INPUT_DEVICE_INDEX",
+    )
+    output_device_index: int | None = Field(
+        default=None,
+        ge=0,
+        validation_alias="KASSETTE_OUTPUT_DEVICE_INDEX",
+    )
     transcript_grooming_profile: Path | None = Field(
         default=None,
         validation_alias="KASSETTE_TRANSCRIPT_GROOMING_PROFILE",

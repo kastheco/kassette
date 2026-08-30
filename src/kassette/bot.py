@@ -537,7 +537,18 @@ async def bot(runner_args: RunnerArguments) -> None:
 if __name__ == "__main__":
     from pipecat.runner.run import app, main
 
+    from kassette.terminal_api import TerminalSessionManager, create_terminal_router
+    from kassette.terminal_runtime import run_terminal_voice_session
     from kassette.tts_api import install_tts_route
 
+    async def run_terminal(session: Any) -> None:
+        await run_terminal_voice_session(
+            session,
+            load_settings(),
+            registry=_registry,
+            lifecycle=_lifecycle,
+        )
+
     install_tts_route(app)
+    app.include_router(create_terminal_router(TerminalSessionManager(run_terminal)))
     main()

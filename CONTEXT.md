@@ -24,6 +24,22 @@ _Avoid_: traditional mode, fallback mode
 A program that requests and controls voice sessions through the kassette service.  
 _Avoid_: consumer, frontend, integration
 
+**Voice surface**
+A voice client's temporary replacement for its normal text-entry area while a voice session is active.
+_Avoid_: voice mode, voice editor, visualizer
+
+**Interim transcript**
+Recognition text that may still change and is not yet part of the user's editable input.
+_Avoid_: live draft, partial message
+
+**Transcript draft**
+Finalized recognition text promoted into the user's editable, unsent input.
+_Avoid_: caption, final transcript, voice message
+
+**Barge-in**
+User speech that interrupts an agent response, stops its playback, and redirects the active agent turn.
+_Avoid_: voice override, cut-off, speech cancellation
+
 **Provider adapter**  
 kassette's boundary around one provider-specific voice protocol and its event semantics.  
 _Avoid_: provider wrapper, driver

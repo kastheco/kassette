@@ -1,0 +1,30 @@
+{
+  "name": "pi-kassette",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "description": "Pi voice surface for the local kassette service.",
+  "exports": "./src/index.ts",
+  "pi": {
+    "extensions": ["./src/index.ts"]
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "ws": "^8.18.3"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.84.4",
+    "@earendil-works/pi-tui": "0.84.4",
+    "@types/node": "^22.15.0",
+    "@types/ws": "^8.18.1",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  }
+}
