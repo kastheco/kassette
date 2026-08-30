@@ -1,6 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { KeyId } from "@earendil-works/pi-tui";
-import { interruptForBargeIn, transcriptDelivery } from "./bridge.js";
+import { deliverVoiceTranscript, interruptForBargeIn, transcriptDelivery } from "./bridge.js";
 import { KassetteClient } from "./client.js";
 import { TranscriptDraft } from "./draft.js";
 import { mergeEditorDraft, resetVoiceBuffers } from "./lifecycle.js";
@@ -34,14 +34,15 @@ export default function piKassette(pi: ExtensionAPI): void {
     const text = draft.consumeAll();
     dispatch({ type: "transcript", text: "", final: true });
     dispatch({ type: "thinking" });
-    if (delivery === "normal") {
-      pi.sendUserMessage(text);
-    } else {
-      ctx.abort();
-      speech.clear();
-      responseCaption = "";
-      pi.sendUserMessage(text, { deliverAs: "steer" });
-    }
+    deliverVoiceTranscript(
+      text,
+      delivery,
+      (message, options) => pi.sendUserMessage(message, options),
+      () => {
+        speech.clear();
+        responseCaption = "";
+      },
+    );
     bargedIn = false;
   };
 

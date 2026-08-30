@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { interruptForBargeIn, transcriptDelivery } from "../src/bridge.js";
+import { deliverVoiceTranscript, interruptForBargeIn, transcriptDelivery } from "../src/bridge.js";
 import { OwnedService } from "../src/client.js";
 import { TranscriptDraft } from "../src/draft.js";
 import { mergeEditorDraft, resetVoiceBuffers } from "../src/lifecycle.js";
@@ -83,6 +83,20 @@ describe("Pi turn delivery", () => {
     expect(transcriptDelivery(true, bargedIn)).toBe("steer");
     expect(transcriptDelivery(false, false)).toBe("steer");
     expect(transcriptDelivery(true, false)).toBe("normal");
+  });
+
+  it("submits manual transcripts normally and busy transcripts as steering messages", () => {
+    const calls: unknown[] = [];
+    const send = (text: string, options?: { deliverAs: "steer" }) => calls.push(["send", text, options]);
+
+    deliverVoiceTranscript("manual message", "normal", send, () => calls.push(["clear"]));
+    deliverVoiceTranscript("interrupt message", "steer", send, () => calls.push(["clear"]));
+
+    expect(calls).toEqual([
+      ["send", "manual message", undefined],
+      ["clear"],
+      ["send", "interrupt message", { deliverAs: "steer" }],
+    ]);
   });
 });
 
