@@ -103,19 +103,23 @@ cancellation-safe rollback, client message bounds, stable audio ownership, and e
 Quicksilver lifecycle ownership. The browser used for this check had no microphone, so live
 mid-speech forced switching is not claimed beyond the deterministic test.
 
-## Pi terminal voice
+## Delegated Quicksilver clients
 
-Observed on the pi-kassette implementation working tree:
+Observed on committed revision [`d9338cb`](https://github.com/kastheco/kassette/commit/d9338cbcdf28dff04f3171d726f7c6b7f655fcaa) after enabling delegated browser and terminal turns and closing the transcript, delegation, and audio-ordering races:
 
 ```bash
-uv run pytest                                      # 122 passed
+uv run pytest                                      # 139 passed
 uv run ruff check .                                # passed
 uv run ruff format --check .                       # 42 files already formatted
 uv run pyright                                     # 0 errors, 0 warnings
-npm test --prefix packages/pi-kassette             # 14 passed
+npm test --prefix packages/pi-kassette             # 30 passed
 npm run typecheck --prefix packages/pi-kassette    # passed
 ```
 
+GitHub Actions run [`33414210142`](https://github.com/kastheco/kassette/actions/runs/33414210142) passed the same Python and TypeScript checks on that revision.
+
+The added coverage verifies provider-mode controls, native delegation request and response pairing, interruption cleanup, bounded client context, terminal input gating, and the rule that Quicksilver turns do not also queue cascade TTS. Race-specific tests cover delegation events that arrive before transcript finalization, synthetic fallback when the provider event is late or missing, late real-ID reconciliation, stale tombstone exclusion, suppression of direct provider audio, and ordered sideband audio delivery without duplicate RTP forwarding.
+
 A real service process also accepted a versioned terminal-session request on a fresh loopback port and returned a session ID, one-use capability, and WebSocket path.
 
-The physical path still needs a manual check in Pi. Enter the voice surface, resume the mic, confirm the waveform follows real input, speak through a full Pi turn, hear sentence-streamed playback, barge in, pause and resume, return to text with an unsent draft, and force one control-channel disconnect. The automated checks do not claim audible playback or working device selection on this machine.
+The physical path still needs a recorded manual check in Pi. Check cascade and Quicksilver separately: enter the voice surface, resume the mic, confirm the waveform follows real input, speak through a full Pi turn, hear one complete response, barge in, pause and resume, return to text with an unsent cascade draft, and force one control-channel disconnect. In Quicksilver mode, also confirm that Pi handles the request and tools before Quicksilver speaks the answer. The browser path still needs a recorded physical-microphone check for native delegated speech and mid-speech switching. The automated checks do not claim audible playback or working device selection on this machine.
