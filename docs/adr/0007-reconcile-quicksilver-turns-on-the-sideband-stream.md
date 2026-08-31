@@ -25,7 +25,7 @@ Treat the finalized user transcript as the request boundary:
 5. If the real provider delegation arrives later, reconcile it with the unresolved synthetic record by normalized request text. A bounded fallback may match the single unresolved record when the provider omitted or changed the request text.
 6. Keep completed synthetic records only as short-lived reconciliation tombstones. Exclude spoken or expired records from new fallback matches.
 7. Accept `delegation.complete` only for the pending client ID. Send the response to a matched real provider delegation when one exists. For an unresolved synthetic delegation, treat client completion as the end of the reconciliation grace period and send the answer as speakable session context immediately; retain the synthetic record as a short-lived tombstone for any later provider delegation.
-8. Suppress provider output until the delegated client response starts. Arm response ownership before writing the delegated answer so an immediate first audio delta cannot race ahead and be discarded. If unauthorized direct output has already begun when a synthetic completion arrives, interrupt that provider turn before sending the delegated answer. Client completion alone does not authorize audio from the discarded direct answer.
+8. Suppress provider output until the delegated client response starts. Arm response ownership before writing the delegated answer so an immediate first audio delta cannot race ahead and be discarded. If unauthorized direct output has already begun when a synthetic completion arrives, request interruption and continue blocking that turn's audio before sending the delegated answer. Client completion alone does not authorize audio from the discarded direct answer.
 9. Clear active, deferred, and unresolved turn state on interruption or teardown.
 
 Use the ordered sideband stream as the source of Quicksilver control events and output audio. Convert sideband audio frames into the Pipecat audio path. Continue draining the mirrored WebRTC remote track so transport backpressure cannot stall the provider, but do not forward that duplicate track to clients.
@@ -39,7 +39,7 @@ Clients treat delegation IDs as opaque and return them unchanged. Synthetic IDs 
 - Late real delegation events can complete the original turn without creating a duplicate client request.
 - Completed turns cannot absorb unrelated future provider delegations after the reconciliation window closes.
 - A synthetic completion cannot remain silent forever while waiting for a provider event that may never arrive.
-- Direct provider audio stays blocked until the delegated response begins, and an in-flight unauthorized turn is cancelled first.
+- Direct provider audio stays blocked until the delegated response begins; interruption is requested for an in-flight unauthorized turn, but audio blocking remains the enforcement boundary.
 - The first delegated audio frame is authorized even when it arrives reentrantly with the response write.
 - Audio, transcript, delegation, and interruption events share one ordered source before entering Pipecat.
 - The mirrored WebRTC audio track still consumes network and decode work, but it is drained rather than forwarded.
