@@ -324,6 +324,43 @@ describe.sequential("pi-kassette extension delivery", () => {
     await app.shutdown();
   });
 
+  it("finishes native playback from the finalized message and clears the sent preview", async () => {
+    const app = harness(true);
+    await app.command();
+    app.emit("provider.active", {
+      provider_id: "quicksilver",
+      capabilities: { mode: "native" },
+    });
+    app.emit("transcript.final", { role: "user", text: "what is your name" });
+    app.emit("delegation.requested", {
+      delegation_id: "delegation-final-message",
+      text: "what is your name",
+    });
+
+    expect(app.sentMessages).toEqual([["what is your name", undefined]]);
+    expect(app.render().join("\n")).toContain("THINKING");
+    expect(app.render().join("\n")).not.toContain("you  › what is your name");
+
+    app.setIdle(false);
+    await app.emitPi("agent_start");
+    await app.emitPi("message_start", { message: { role: "assistant" } });
+    await app.emitPi("message_end", {
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "I’m Pi." }],
+      },
+    });
+    app.setIdle(true);
+    await app.emitPi("agent_settled");
+
+    expect(app.getClientCommands()).toContainEqual([
+      "delegation.complete",
+      { delegation_id: "delegation-final-message", text: "I’m Pi." },
+    ]);
+    expect(app.render().join("\n")).toContain("LISTENING");
+    await app.shutdown();
+  });
+
   it("drops a delegated response after native playback is interrupted", async () => {
     const app = harness(true);
     await app.command();

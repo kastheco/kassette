@@ -18,6 +18,23 @@ const defaultDependencies: PiKassetteDependencies = {
   createClient: (options) => new KassetteClient(options),
 };
 
+function finalizedAssistantText(message: unknown): string {
+  if (!message || typeof message !== "object") return "";
+  const content = (message as { content?: unknown }).content;
+  if (typeof content === "string") return content.trim();
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter((part): part is { type: "text"; text: string } => (
+      Boolean(part)
+      && typeof part === "object"
+      && (part as { type?: unknown }).type === "text"
+      && typeof (part as { text?: unknown }).text === "string"
+    ))
+    .map((part) => part.text)
+    .join("")
+    .trim();
+}
+
 export function createPiKassette(
   pi: ExtensionAPI,
   dependencies: PiKassetteDependencies = defaultDependencies,
@@ -51,9 +68,11 @@ export function createPiKassette(
     if (!pendingDelegationId || !pendingDelegationText || !ctx) return;
     const text = pendingDelegationText;
     pendingDelegationText = undefined;
+    nativeTranscript = "";
     responseCaption = "";
     speech.clear();
     const delivery = transcriptDelivery(ctx.isIdle(), bargedIn);
+    dispatch({ type: "transcript", text: "", final: true });
     dispatch({ type: "thinking" });
     deliverVoiceTranscript(
       text,
@@ -306,6 +325,11 @@ export function createPiKassette(
     responseCaption += delta;
     if (providerMode === "cascaded") speech.push(delta);
   });
+  pi.on("message_end", (event) => {
+    if (!active || suppressCurrentResponse || event.message.role !== "assistant") return;
+    const finalized = finalizedAssistantText(event.message);
+    if (finalized) responseCaption = finalized;
+  });
   pi.on("agent_settled", () => {
     if (!active) return;
     if (providerMode === "native") {
@@ -314,9 +338,10 @@ export function createPiKassette(
           delegation_id: pendingDelegationId,
           text: responseCaption.trim().slice(0, 32_000),
         });
-        pendingDelegationId = undefined;
-        pendingDelegationText = undefined;
       }
+      pendingDelegationId = undefined;
+      pendingDelegationText = undefined;
+      dispatch({ type: "listening" });
     } else if (suppressCurrentResponse) {
       speech.clear();
     } else {
