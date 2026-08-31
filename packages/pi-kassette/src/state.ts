@@ -59,7 +59,7 @@ export function reduceVoiceState(state: VoiceState, action: VoiceAction): VoiceS
     case "input-paused": return { ...state, status: "mic paused", inputLevel: 0 };
     case "input-resumed": return { ...state, status: "listening" };
     case "listening": return state.status === "mic paused" ? state : { ...state, status: "listening", outputLevel: 0 };
-    case "level": return {
+    case "level": return state.status === "failed" ? state : {
       ...state,
       [action.direction === "input" ? "inputLevel" : "outputLevel"]: Math.max(0, Math.min(1, action.level)),
       ...(action.direction === "input" ? { lastInputLevelAt: action.at ?? Date.now() } : {}),
@@ -73,7 +73,13 @@ export function reduceVoiceState(state: VoiceState, action: VoiceAction): VoiceS
     case "speaking": return { ...state, status: "speaking", response: action.text };
     case "interrupted": return { ...state, status: "interrupted", outputLevel: 0 };
     case "reconnecting": return { ...state, status: "reconnecting" };
-    case "failed": return { ...state, status: "failed", error: action.error };
+    case "failed": return {
+      ...state,
+      status: "failed",
+      inputLevel: 0,
+      outputLevel: 0,
+      error: action.error,
+    };
     case "toggle-auto-send": return { ...state, autoSend: !state.autoSend };
     case "toggle-output-mute": return { ...state, outputMuted: !state.outputMuted };
   }
@@ -95,7 +101,7 @@ function statusColor(status: VoiceStatus, style: VoiceSurfaceStyle): (text: stri
 function spectrum(level: number, width: number, phase: number): string {
   const cells = Math.max(12, Math.min(48, width));
   const bars = "▁▂▃▄▅▆▇█";
-  const normalized = Math.max(0, Math.min(1, (level - 0.001) / 0.02));
+  const normalized = Math.max(0, Math.min(1, (level - 0.008) / 0.05));
   const boosted = Math.sqrt(normalized);
   if (boosted < 0.025) return "·".repeat(cells);
   const center = (cells - 1) / 2;

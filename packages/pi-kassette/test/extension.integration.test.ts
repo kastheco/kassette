@@ -162,6 +162,29 @@ describe.sequential("pi-kassette extension delivery", () => {
     await app.shutdown();
   });
 
+  it("shows provider startup failure without a live mic meter", async () => {
+    const app = harness(true);
+    await app.command();
+
+    app.emit("audio.level", { direction: "input", level: 0.08 });
+    app.emit("session.state_changed", {
+      state: "failed",
+      provider_type: "quicksilver",
+    });
+    app.emit("session.error", {
+      error_code: "provider_error",
+      provider_type: "quicksilver",
+      message: "provider error",
+    });
+    app.emit("audio.level", { direction: "input", level: 0.08 });
+
+    const surface = app.render().join("\n");
+    expect(surface).toContain("Quicksilver voice failed to start");
+    expect(surface).not.toContain("Kassette failed");
+    expect(surface).not.toMatch(/[▂▃▄▅▆▇█]/);
+    await app.shutdown();
+  });
+
   it("uses Space to stop playback and immediately resume listening", async () => {
     process.env.KASSETTE_AUTO_SEND = "0";
     const app = harness(true);

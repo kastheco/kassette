@@ -183,7 +183,17 @@ export function createPiKassette(
       if (data.state === "listening") dispatch({ type: "listening" });
       else if (data.state === "speaking") dispatch({ type: "speaking", text: responseCaption });
       else if (data.state === "interrupting") dispatch({ type: "interrupted" });
-      else if (data.state === "failed") dispatch({ type: "failed", error: "Kassette failed" });
+      else if (data.state === "failed") dispatch({ type: "failed", error: "Voice provider failed" });
+    } else if (message.type === "session.error") {
+      const provider = data.provider_type;
+      const errorCode = data.error_code;
+      const messageText = data.message;
+      const error = provider === "quicksilver" && errorCode === "provider_error"
+        ? "Quicksilver voice failed to start"
+        : typeof messageText === "string" && messageText.trim()
+          ? messageText.trim()
+          : "Voice provider failed";
+      dispatch({ type: "failed", error });
     } else if (message.type === "session.interrupted") {
       outputPending = false;
       pendingDelegationId = undefined;

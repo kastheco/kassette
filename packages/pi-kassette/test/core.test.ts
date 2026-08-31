@@ -218,12 +218,27 @@ describe("voice surface", () => {
     expect(renderVoiceSurface(state, 48, 2_600).join("\n")).not.toContain("mic levels delayed");
 
     const quietMic = reduceVoiceState(state, { type: "level", direction: "input", level: 0.006, at: 3_000 });
-    expect(renderVoiceSurface(quietMic, 48, 3_010).join("\n")).toMatch(/[▂▃▄▅▆▇█]/);
+    expect(renderVoiceSurface(quietMic, 48, 3_010).join("\n")).not.toMatch(/[▂▃▄▅▆▇█]/);
+
+    const activeMic = reduceVoiceState(state, { type: "level", direction: "input", level: 0.05, at: 3_000 });
+    expect(renderVoiceSurface(activeMic, 48, 3_010).join("\n")).toMatch(/[▂▃▄▅▆▇█]/);
 
     const speaking = reduceVoiceState(quietMic, { type: "speaking", text: "assistant reply stays in chat" });
     const speakingSurface = renderVoiceSurface(speaking, 48, 3_020).join("\n");
     expect(speakingSurface).not.toContain("assistant reply stays in chat");
     expect(speakingSurface).toContain("space stop");
+  });
+
+  it("stops rendering live levels after the voice provider fails", () => {
+    let state = reduceVoiceState(initialVoiceState(), { type: "input-resumed" });
+    state = reduceVoiceState(state, { type: "level", direction: "input", level: 0.08, at: 1_000 });
+    state = reduceVoiceState(state, { type: "failed", error: "Quicksilver failed to start" });
+    state = reduceVoiceState(state, { type: "level", direction: "input", level: 0.08, at: 1_100 });
+
+    const surface = renderVoiceSurface(state, 48, 1_110).join("\n");
+    expect(surface).toContain("FAILED");
+    expect(surface).toContain("Quicksilver failed to start");
+    expect(surface).not.toMatch(/[▂▃▄▅▆▇█]/);
   });
 
   it("warns about delayed mic telemetry only while idle listening", () => {
