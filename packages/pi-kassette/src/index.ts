@@ -35,6 +35,7 @@ export function createPiKassette(
   let providerMode: ProviderMode = "cascaded";
   let pendingDelegationId: string | undefined;
   let pendingDelegationText: string | undefined;
+  let lastAutoSendToggleAt = 0;
   let surface: VoiceSurface | undefined;
   let editorBeforeVoice = "";
   const draft = new TranscriptDraft();
@@ -195,6 +196,7 @@ export function createPiKassette(
     providerMode = "cascaded";
     pendingDelegationId = undefined;
     pendingDelegationText = undefined;
+    lastAutoSendToggleAt = 0;
     inputPaused = false;
     desiredInputPaused = true;
     editorBeforeVoice = "";
@@ -225,6 +227,9 @@ export function createPiKassette(
         client?.send(desiredInputPaused ? "input.pause" : "input.resume");
       },
       toggleAutoSend: () => {
+        const now = Date.now();
+        if (now - lastAutoSendToggleAt < 150) return;
+        lastAutoSendToggleAt = now;
         dispatch({ type: "toggle-auto-send" });
         if (providerMode === "native" && state.autoSend) submitNativeDelegation();
       },

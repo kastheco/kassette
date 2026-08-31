@@ -26,7 +26,7 @@ Both provider modes use:
 
 - configured shortcut or `/kassette`: enter or leave
 - `Space`: pause or resume the mic
-- `Shift+Space`: toggle auto-send
+- `A`: toggle auto-send
 - `Enter`: send the current transcript or native delegation
 - `M`: mute or unmute response audio
 - Pi's cancel key: stop speech and interrupt the active Pi turn

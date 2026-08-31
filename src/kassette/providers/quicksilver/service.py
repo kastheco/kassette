@@ -74,6 +74,14 @@ async def _discard_event(_: SessionEvent) -> None:
     return
 
 
+def _has_audible_audio(audio: bytes, *, floor: int = 32) -> bool:
+    """Reject empty provider audio that would otherwise leave the session speaking."""
+    if len(audio) < 2:
+        return False
+    samples = memoryview(audio)[: len(audio) - len(audio) % 2].cast("h")
+    return any(sample >= floor or sample <= -floor for sample in samples)
+
+
 class GPTLiveService(FrameProcessor):
     """Keep Quicksilver details behind a normal Pipecat audio processor."""
 
@@ -288,6 +296,8 @@ class GPTLiveService(FrameProcessor):
 
     async def _handle_provider_audio(self, chunk: AudioChunk) -> None:
         if self._closed or not await self._is_current():
+            return
+        if not _has_audible_audio(chunk.audio):
             return
         if not self._speaking:
             self._speaking = True

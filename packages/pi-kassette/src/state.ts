@@ -158,7 +158,7 @@ export function renderVoiceSurface(
 
   const hintsRaw = state.status === "speaking"
     ? "space stop · m mute · esc text"
-    : "space mic · ⇧space auto · ↵ send · m · esc";
+    : "space mic · a auto · ↵ send · m · esc";
   const hints = hintsRaw.slice(0, innerWidth);
   lines.push(`${style.accent("╰─")}${style.muted(` ${hints} `)}${style.accent("─".repeat(Math.max(0, panelWidth - hints.length - 4)))}${style.accent("╯")}`);
   return lines;

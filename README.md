@@ -46,7 +46,7 @@ install the extension from this checkout:
 pi install ./packages/pi-kassette
 ```
 
-start pi normally, then use `/kassette` or `Ctrl+Shift+V`. the voice surface starts with the mic paused. `Space` toggles the mic, `Shift+Space` toggles auto-send, `Enter` sends the pending request, `M` mutes playback, and `Escape` returns to pi's editor. cascade mode also uses `Backspace` to remove the last finished utterance. in quicksilver mode, auto-send delegates native turns immediately; manual send holds the recognized request until `Enter`. quicksilver speaks pi's answer after the delegated turn completes.
+start pi normally, then use `/kassette` or `Ctrl+Shift+V`. the voice surface starts with the mic paused. `Space` toggles the mic, `A` toggles auto-send, `Enter` sends the pending request, `M` mutes playback, and `Escape` returns to pi's editor. cascade mode also uses `Backspace` to remove the last finished utterance. in quicksilver mode, auto-send delegates native turns immediately; manual send holds the recognized request until `Enter`. quicksilver speaks pi's answer after the delegated turn completes.
 
 the extension connects to `http://127.0.0.1:7860` and starts `kassette serve` when needed. override those with `KASSETTE_URL` and `KASSETTE_COMMAND`. `KASSETTE_SHORTCUT` changes the activation binding. `KASSETTE_RECONNECT_MS`, `KASSETTE_AUTO_SEND=1`, and `KASSETTE_OUTPUT_MUTED=1` control the remaining client defaults. the service uses the system audio devices unless `KASSETTE_INPUT_DEVICE_INDEX` or `KASSETTE_OUTPUT_DEVICE_INDEX` is set.
 

@@ -112,6 +112,40 @@ async def test_fake_native_provider_completes_session_lifecycle() -> None:
     assert SessionEventType.INTERRUPTED in {event.type for event in events}
 
 
+async def test_silent_provider_audio_does_not_trap_session_in_speaking() -> None:
+    registry = SessionRegistry()
+    await registry.create("voice-1")
+    events: list[SessionEvent] = []
+    transports: list[FakeTransport] = []
+
+    def create_transport(**kwargs: Any) -> FakeTransport:
+        transport = FakeTransport(**kwargs)
+        transports.append(transport)
+        return transport
+
+    async def collect(event: SessionEvent) -> None:
+        events.append(event)
+
+    service = RecordingGPTLiveService(
+        session_id="voice-1",
+        registry=registry,
+        credentials=FakeCredentials(),
+        event_sink=collect,
+        transport_factory=create_transport,
+    )
+    await service._start_session()  # pyright: ignore[reportPrivateUsage]
+
+    await transports[0].audio_sink(
+        AudioChunk(audio=b"\x00" * 4_800, sample_rate=24_000, num_channels=1)
+    )
+
+    assert (await registry.get("voice-1")).state is SessionState.LISTENING
+    assert SessionEventType.SPEECH_STARTED not in {event.type for event in events}
+    assert not any(isinstance(frame, OutputAudioRawFrame) for frame, _ in service.pushed_frames)
+
+    await service._close()  # pyright: ignore[reportPrivateUsage]
+
+
 async def test_client_delegation_round_trip_uses_matching_pi_response() -> None:
     registry = SessionRegistry()
     await registry.create("voice-1")
@@ -319,7 +353,7 @@ async def test_pipecat_and_quicksilver_exchange_audio_in_process() -> None:
     ]
     assert [event.type for event in events].count(SessionEventType.INPUT_AUDIO_STARTED) == 1
 
-    provider_audio = AudioChunk(audio=b"\x03\x00\x04\x00", sample_rate=24_000, num_channels=1)
+    provider_audio = AudioChunk(audio=b"\x2c\x01\x90\x01", sample_rate=24_000, num_channels=1)
     await transports[0].audio_sink(provider_audio)
     output = service.pushed_frames[-1]
     assert isinstance(output[0], OutputAudioRawFrame)
@@ -361,7 +395,7 @@ async def test_provider_events_are_normalized_without_leaking_provider_behavior(
     await transport.event_sink(
         ProviderEvent(type="input_transcript.added", role="user", text="hello")
     )
-    await transport.audio_sink(AudioChunk(audio=b"\x01\x00", sample_rate=24_000, num_channels=1))
+    await transport.audio_sink(AudioChunk(audio=b"\x64\x00", sample_rate=24_000, num_channels=1))
     await transport.event_sink(ProviderEvent(type="turn.done", role="assistant", text="hi"))
     await transport.event_sink(
         ProviderEvent(type="delegation.created", delegation_id="delegation-1")

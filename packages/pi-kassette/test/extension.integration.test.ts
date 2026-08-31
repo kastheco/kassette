@@ -270,6 +270,7 @@ describe.sequential("pi-kassette extension delivery", () => {
     });
 
     app.press("\u001b[32;2u");
+    app.press("\u001b[32;2u");
     app.emit("speech.started", {});
     app.emit("delegation.requested", {
       delegation_id: "delegation-manual",

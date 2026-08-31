@@ -14,6 +14,8 @@ export type VoiceSurfaceInput =
 
 export function voiceSurfaceInput(data: string, matchesInterrupt: boolean): VoiceSurfaceInput {
   if (matchesKey(data, "escape")) return "exit";
+  if (data === " ") return "toggle-input";
+  if (data === "a" || data === "A") return "toggle-auto-send";
   if (matchesKey(data, "shift+space")) return "toggle-auto-send";
   if (matchesKey(data, "space")) return "toggle-input";
   if (matchesKey(data, "return")) return "submit";
