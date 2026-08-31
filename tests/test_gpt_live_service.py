@@ -107,6 +107,69 @@ async def test_fake_native_provider_completes_session_lifecycle() -> None:
     assert SessionEventType.INTERRUPTED in {event.type for event in events}
 
 
+async def test_client_delegation_round_trip_uses_matching_pi_response() -> None:
+    registry = SessionRegistry()
+    await registry.create("voice-1")
+    events: list[SessionEvent] = []
+    transports: list[FakeTransport] = []
+
+    def create_transport(**kwargs: Any) -> FakeTransport:
+        transport = FakeTransport(**kwargs)
+        transports.append(transport)
+        return transport
+
+    async def collect(event: SessionEvent) -> None:
+        events.append(event)
+
+    service = GPTLiveService(
+        session_id="voice-1",
+        registry=registry,
+        credentials=FakeCredentials(),
+        event_sink=collect,
+        transport_factory=create_transport,
+        client_delegation=True,
+    )
+    await service._start_session()  # pyright: ignore[reportPrivateUsage]
+
+    await transports[0].event_sink(
+        ProviderEvent(
+            type="delegation.created",
+            delegation_id="delegation-1",
+            text="inspect the repository",
+        )
+    )
+
+    assert events[-1].type is SessionEventType.DELEGATION_REQUESTED
+    assert events[-1].text == "inspect the repository"
+    assert events[-1].metadata == {"delegation_id": "delegation-1"}
+    assert transports[0].sent_messages == []
+    assert await service.handle_client_message(
+        {"label": "kassette", "type": "input.pause", "data": {}}
+    )
+
+    assert await service.handle_client_message(
+        {
+            "label": "kassette",
+            "type": "delegation.complete",
+            "data": {"delegation_id": "delegation-1", "text": "Pi inspected it."},
+        }
+    )
+    assert transports[0].sent_messages == [
+        {
+            "type": "delegation.context.append",
+            "delegation_item_id": "delegation-1",
+            "content": [{"type": "input_text", "text": "Pi inspected it."}],
+        }
+    ]
+    assert not await service.handle_client_message(
+        {
+            "label": "kassette",
+            "type": "delegation.complete",
+            "data": {"delegation_id": "delegation-1", "text": "duplicate"},
+        }
+    )
+
+
 async def test_external_runtime_owns_session_lifecycle_and_audio_lease() -> None:
     registry = SessionRegistry()
     snapshot = await registry.create("voice-1", initial_provider_id="quicksilver")

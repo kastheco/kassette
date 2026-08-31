@@ -32,6 +32,7 @@ class SessionEventType(StrEnum):
     SPEECH_STARTED = "speech.started"
     SPEECH_STOPPED = "speech.stopped"
     INTERRUPTED = "session.interrupted"
+    DELEGATION_REQUESTED = "delegation.requested"
     DELEGATION_UNAVAILABLE = "delegation.unavailable"
     PROVIDER_UNKNOWN = "provider.unknown"
     PROVIDER_AVAILABLE = "provider.available"

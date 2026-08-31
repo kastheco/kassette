@@ -1,6 +1,7 @@
 from kassette.credentials import CodexCredentials
 from kassette.providers.quicksilver.protocol import (
     LIVE_MODEL,
+    build_delegation_response,
     build_live_headers,
     build_session_payload,
     parse_call_id,
@@ -14,6 +15,14 @@ def test_session_payload_selects_gpt_live() -> None:
 
     assert payload["model"] == LIVE_MODEL
     assert payload["audio"] == {"output": {"voice": "sol"}}
+
+
+def test_delegation_response_returns_pi_answer_to_the_matching_live_turn() -> None:
+    assert build_delegation_response("delegation-1", "Pi answer") == {
+        "type": "delegation.context.append",
+        "delegation_item_id": "delegation-1",
+        "content": [{"type": "input_text", "text": "Pi answer"}],
+    }
 
 
 def test_live_headers_bind_session_without_leaking_from_repr() -> None:

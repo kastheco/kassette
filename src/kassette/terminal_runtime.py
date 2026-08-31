@@ -153,9 +153,12 @@ def session_event_envelope(event: SessionEvent) -> dict[str, object] | None:
     if event.type not in {
         SessionEventType.SESSION_STATE_CHANGED,
         SessionEventType.INPUT_AUDIO_STARTED,
+        SessionEventType.TRANSCRIPT_DELTA,
+        SessionEventType.TRANSCRIPT_FINAL,
         SessionEventType.SPEECH_STARTED,
         SessionEventType.SPEECH_STOPPED,
         SessionEventType.INTERRUPTED,
+        SessionEventType.DELEGATION_REQUESTED,
         SessionEventType.ERROR,
     }:
         return None
@@ -163,6 +166,10 @@ def session_event_envelope(event: SessionEvent) -> dict[str, object] | None:
     data["session_id"] = event.session_id
     if event.state is not None:
         data["state"] = event.state.value
+    if event.role is not None:
+        data["role"] = event.role.value
+    if event.text is not None:
+        data["text"] = event.text
     if event.provider_type is not None:
         data["provider_type"] = event.provider_type
     if event.error_code is not None:
@@ -178,13 +185,10 @@ async def run_terminal_voice_session(
     lifecycle: LiveSessionCoordinator,
 ) -> None:
     """Attach a negotiated terminal control channel to one local audio pipeline."""
-    if settings.voice_backend != "cascade":
-        await session.send(
-            envelope("session.error", {"message": "Pi terminal voice requires cascade"})
-        )
-        return
-
-    snapshot = await registry.create(session.session_id, initial_provider_id="cascade")
+    snapshot = await registry.create(
+        session.session_id,
+        initial_provider_id=settings.voice_backend,
+    )
     lease = TerminalAudioLease(registry, snapshot)
     transport = StableLocalAudioTransport(
         LocalAudioTransportParams(
@@ -202,7 +206,17 @@ async def run_terminal_voice_session(
     output_processor = TerminalOutputProcessor(session.send)
     input_control = TerminalInputControl()
     pause_tasks: set[asyncio.Task[bool]] = set()
-    providers = build_builtin_provider_registry(settings, session_registry=registry)
+    providers = build_builtin_provider_registry(
+        settings,
+        session_registry=registry,
+        quicksilver_client_delegation=True,
+    )
+    active_provider = settings.voice_backend
+
+    async def set_terminal_input_paused(paused: bool) -> None:
+        await input_processor.set_paused(paused)
+        if active_provider == "quicksilver":
+            await session.send(envelope("input.state_changed", {"paused": paused}))
 
     def finish_pause_task(task: asyncio.Task[bool]) -> None:
         pause_tasks.discard(task)
@@ -210,19 +224,26 @@ async def run_terminal_voice_session(
             session.closed.set()
 
     async def event_sink(event: SessionEvent) -> None:
+        nonlocal active_provider
+        if event.type is SessionEventType.PROVIDER_ACTIVE and event.provider_type is not None:
+            active_provider = event.provider_type
         if event.type is SessionEventType.SPEECH_STARTED:
             await input_processor.set_output_active(True)
         elif event.type in {SessionEventType.SPEECH_STOPPED, SessionEventType.INTERRUPTED}:
             await input_processor.set_output_active(False)
         message = session_event_envelope(event)
-        if message is not None:
+        is_transcript = event.type in {
+            SessionEventType.TRANSCRIPT_DELTA,
+            SessionEventType.TRANSCRIPT_FINAL,
+        }
+        if message is not None and (not is_transcript or active_provider == "quicksilver"):
             await session.send(message)
         if (
             event.type is SessionEventType.SESSION_STATE_CHANGED
             and event.state is SessionState.LISTENING
         ):
             task = asyncio.create_task(
-                input_control.adapter_ready(runtime, input_processor.set_paused)
+                input_control.adapter_ready(runtime, set_terminal_input_paused)
             )
             pause_tasks.add(task)
             task.add_done_callback(finish_pause_task)
@@ -230,7 +251,7 @@ async def run_terminal_voice_session(
     runtime = VoiceProviderRuntime(
         session_id=session.session_id,
         session_generation=snapshot.generation,
-        initial_provider_id="cascade",
+        initial_provider_id=settings.voice_backend,
         registry=registry,
         providers=providers,
         event_sink=event_sink,
@@ -265,7 +286,7 @@ async def run_terminal_voice_session(
                 await input_control.request(
                     message_type == "input.pause",
                     runtime,
-                    input_processor.set_paused,
+                    set_terminal_input_paused,
                 )
             elif message_type == "output.mute":
                 output_processor.muted = bool(data.get("muted", True))

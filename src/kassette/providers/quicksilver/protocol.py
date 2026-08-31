@@ -115,17 +115,19 @@ def build_session_close() -> dict[str, str]:
     return {"type": "session.close"}
 
 
-def build_delegation_unavailable(delegation_id: str) -> dict[str, Any]:
+def build_delegation_response(delegation_id: str, text: str) -> dict[str, Any]:
     return {
         "type": "delegation.context.append",
         "delegation_item_id": delegation_id,
-        "content": [
-            {
-                "type": "input_text",
-                "text": "Delegation is unavailable in this voice client. Answer directly.",
-            }
-        ],
+        "content": [{"type": "input_text", "text": text}],
     }
+
+
+def build_delegation_unavailable(delegation_id: str) -> dict[str, Any]:
+    return build_delegation_response(
+        delegation_id,
+        "Delegation is unavailable in this voice client. Answer directly.",
+    )
 
 
 def parse_provider_event(payload: str | bytes | dict[str, Any]) -> ProviderEvent | None:

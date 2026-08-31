@@ -161,6 +161,7 @@ def build_builtin_provider_registry(
     session_registry: SessionRegistry,
     credential_provider: CodexCredentialProvider | None = None,
     quicksilver_transport_factory: TransportFactory = QuicksilverTransport,
+    quicksilver_client_delegation: bool = False,
 ) -> VoiceProviderRegistry:
     """Build the two real provider adapters behind one runtime registry."""
     transcription_key_available = (
@@ -257,8 +258,13 @@ def build_builtin_provider_registry(
             event_sink=context.event_sink,
             transport_factory=quicksilver_transport_factory,
             manage_session_lifecycle=False,
+            client_delegation=quicksilver_client_delegation,
         )
-        return PipelineProviderAdapter([service], frame_sink=context.frame_sink)
+        return PipelineProviderAdapter(
+            [service],
+            frame_sink=context.frame_sink,
+            message_handler=service.handle_client_message,
+        )
 
     return VoiceProviderRegistry(
         [
@@ -276,7 +282,7 @@ def build_builtin_provider_registry(
                     provider_id="quicksilver",
                     mode=VoiceProviderMode.NATIVE,
                     credential_readiness=CredentialReadiness.UNKNOWN,
-                    supports_input_pause=False,
+                    supports_input_pause=quicksilver_client_delegation,
                 ),
                 factory=build_quicksilver,
             ),

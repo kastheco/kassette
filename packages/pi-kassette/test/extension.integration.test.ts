@@ -188,9 +188,34 @@ describe.sequential("pi-kassette extension delivery", () => {
     });
 
     expect(app.getClientCommands()).toEqual([]);
-    await app.emitPi("message_end");
+    await app.emitPi("agent_settled");
     expect(app.getClientCommands()).toEqual([
       ["tts.speak", { text: "Got it. Here is the rest." }],
+    ]);
+    await app.shutdown();
+  });
+
+  it("speaks only the final assistant message after tool turns settle", async () => {
+    const app = harness(false);
+    await app.command();
+
+    await app.emitPi("agent_start");
+    await app.emitPi("message_start", { message: { role: "assistant" } });
+    await app.emitPi("message_update", {
+      assistantMessageEvent: { type: "text_delta", delta: "I will inspect that." },
+    });
+    await app.emitPi("message_end", { message: { role: "assistant" } });
+    expect(app.getClientCommands()).toEqual([]);
+
+    await app.emitPi("message_start", { message: { role: "assistant" } });
+    await app.emitPi("message_update", {
+      assistantMessageEvent: { type: "text_delta", delta: "The final answer." },
+    });
+    await app.emitPi("message_end", { message: { role: "assistant" } });
+    await app.emitPi("agent_settled");
+
+    expect(app.getClientCommands()).toEqual([
+      ["tts.speak", { text: "The final answer." }],
     ]);
     await app.shutdown();
   });
@@ -207,7 +232,7 @@ describe.sequential("pi-kassette extension delivery", () => {
     await app.emitPi("message_update", {
       assistantMessageEvent: { type: "text_delta", delta: " Late response text." },
     });
-    await app.emitPi("message_end");
+    await app.emitPi("agent_settled");
 
     expect(app.getAbortCount()).toBe(1);
     expect(app.getClientCommands()).toEqual([]);
@@ -222,7 +247,7 @@ describe.sequential("pi-kassette extension delivery", () => {
     await app.emitPi("message_update", {
       assistantMessageEvent: { type: "text_delta", delta: "Queued reply." },
     });
-    await app.emitPi("message_end");
+    await app.emitPi("agent_settled");
     app.setIdle(true);
     app.emit("input.audio_started", {});
 
@@ -231,6 +256,65 @@ describe.sequential("pi-kassette extension delivery", () => {
       ["output.cancel", {}],
     ]);
     expect(app.getAbortCount()).toBe(0);
+    await app.shutdown();
+  });
+
+  it("delegates native Quicksilver turns through Pi and returns one answer", async () => {
+    const app = harness(true);
+    await app.command();
+    app.emit("provider.active", {
+      provider_id: "quicksilver",
+      capabilities: { mode: "native" },
+    });
+
+    app.emit("transcript.final", { role: "user", text: "voice transcript" });
+    expect(app.sentMessages).toEqual([]);
+
+    app.emit("delegation.requested", {
+      delegation_id: "delegation-1",
+      text: "inspect the repository",
+    });
+    expect(app.sentMessages).toEqual([["inspect the repository", undefined]]);
+
+    app.setIdle(false);
+    await app.emitPi("agent_start");
+    await app.emitPi("message_update", {
+      assistantMessageEvent: { type: "text_delta", delta: "Pi found " },
+    });
+    await app.emitPi("message_update", {
+      assistantMessageEvent: { type: "text_delta", delta: "the answer." },
+    });
+    await app.emitPi("agent_settled");
+
+    expect(app.getClientCommands()).toContainEqual([
+      "delegation.complete",
+      { delegation_id: "delegation-1", text: "Pi found the answer." },
+    ]);
+    expect(app.getClientCommands().some(([type]) => type === "tts.speak")).toBe(false);
+    await app.shutdown();
+  });
+
+  it("drops a delegated response after native playback is interrupted", async () => {
+    const app = harness(true);
+    await app.command();
+    app.emit("provider.active", {
+      provider_id: "quicksilver",
+      capabilities: { mode: "native" },
+    });
+    app.emit("delegation.requested", {
+      delegation_id: "delegation-1",
+      text: "start work",
+    });
+    app.setIdle(false);
+    await app.emitPi("agent_start");
+    await app.emitPi("message_update", {
+      assistantMessageEvent: { type: "text_delta", delta: "stale answer" },
+    });
+
+    app.emit("session.interrupted", {});
+    await app.emitPi("agent_settled");
+
+    expect(app.getClientCommands().some(([type]) => type === "delegation.complete")).toBe(false);
     await app.shutdown();
   });
 

@@ -1,6 +1,8 @@
 export type VoiceStatus = "connecting" | "mic paused" | "listening" | "transcribing" | "thinking" | "speaking" | "interrupted" | "reconnecting" | "failed";
+export type ProviderMode = "cascaded" | "native";
 export type VoiceState = {
   status: VoiceStatus;
+  providerMode: ProviderMode;
   inputLevel: number;
   outputLevel: number;
   transcript: string;
@@ -12,6 +14,7 @@ export type VoiceState = {
 };
 export type VoiceAction =
   | { type: "connected" }
+  | { type: "provider-mode"; mode: ProviderMode }
   | { type: "input-paused" }
   | { type: "input-resumed" }
   | { type: "listening" }
@@ -46,12 +49,13 @@ const plainStyle: VoiceSurfaceStyle = {
 };
 
 export function initialVoiceState(): VoiceState {
-  return { status: "connecting", inputLevel: 0, outputLevel: 0, transcript: "", response: "", autoSend: false, outputMuted: false, lastInputLevelAt: 0 };
+  return { status: "connecting", providerMode: "cascaded", inputLevel: 0, outputLevel: 0, transcript: "", response: "", autoSend: false, outputMuted: false, lastInputLevelAt: 0 };
 }
 
 export function reduceVoiceState(state: VoiceState, action: VoiceAction): VoiceState {
   switch (action.type) {
     case "connected": return state;
+    case "provider-mode": return { ...state, providerMode: action.mode };
     case "input-paused": return { ...state, status: "mic paused", inputLevel: 0 };
     case "input-resumed": return { ...state, status: "listening" };
     case "listening": return state.status === "mic paused" ? state : { ...state, status: "listening", outputLevel: 0 };
@@ -135,7 +139,9 @@ export function renderVoiceSurface(
   const visualContent = `${" ".repeat(visualPad)}${visualRaw}`;
   lines.push(frameLine(visualContent, inputStale ? style.error(visualContent) : style.accent(visualContent), innerWidth, style));
 
-  const modeRaw = `${activeOutput ? "output" : "input"}  ${state.autoSend ? "auto-send" : "manual send"}  ·  ${state.outputMuted ? "muted" : "sound on"}`;
+  const modeRaw = state.providerMode === "native"
+    ? `${activeOutput ? "output" : "input"}  native voice  ·  ${state.outputMuted ? "muted" : "sound on"}`
+    : `${activeOutput ? "output" : "input"}  ${state.autoSend ? "auto-send" : "manual send"}  ·  ${state.outputMuted ? "muted" : "sound on"}`;
   lines.push(frameLine(modeRaw, style.muted(modeRaw), innerWidth, style));
 
   const transcriptRaw = state.transcript ? `you  › ${tail(state.transcript, innerWidth - 7)}` : state.status === "mic paused" ? "you  › mic paused" : "you  › say something…";
@@ -151,7 +157,9 @@ export function renderVoiceSurface(
 
   const hintsRaw = state.status === "speaking"
     ? "space stop · m mute · esc text"
-    : "space mic · ⇧space auto · ↵ send · m · esc";
+    : state.providerMode === "native"
+      ? "space mic · m mute · esc text"
+      : "space mic · ⇧space auto · ↵ send · m · esc";
   const hints = hintsRaw.slice(0, innerWidth);
   lines.push(`${style.accent("╰─")}${style.muted(` ${hints} `)}${style.accent("─".repeat(Math.max(0, panelWidth - hints.length - 4)))}${style.accent("╯")}`);
   return lines;

@@ -23,7 +23,7 @@ uv run kassette serve --client-origin http://127.0.0.1:5173
 uv run kassette call
 ```
 
-The local `.env` file is gitignored. `GOOGLE_API_KEY` authenticates `gemini-3.5-transcribe-live`; `FISH_API_KEY` authenticates Fish Audio `s2.1-pro`. `FISH_VOICE_ID` is optional. To use GPT transcription in cascade mode, set `KASSETTE_TRANSCRIPTION_PROVIDER=openai` and `OPENAI_API_KEY`. The default OpenAI model is `gpt-live-transcribe`, configurable through `KASSETTE_OPENAI_TRANSCRIPTION_MODEL`.
+The local `.env` file is gitignored. `GOOGLE_API_KEY` authenticates `gemini-3.5-transcribe-live`; `FISH_API_KEY` authenticates Fish Audio `s2.1-pro`. `FISH_VOICE_ID` is optional. To use GPT transcription in cascade mode, set `KASSETTE_TRANSCRIPTION_PROVIDER=openai` and `OPENAI_API_KEY`. The default OpenAI model is `gpt-live-transcribe`, configurable through `KASSETTE_OPENAI_TRANSCRIPTION_MODEL`. Set `KASSETTE_VOICE_BACKEND=quicksilver` to use the Codex-authenticated native voice adapter instead of the cascade.
 
 The service binds a loopback address only; `serve` and `call` both reject non-loopback hosts. Browser origins are separate: `--client-origin` allowlists exact additional HTTP(S) origins, which may be non-loopback, so a trusted remote client can reach a loopback-bound listener over an existing private network path. Origins with credentials, a path, a query, or a fragment are rejected.
 
@@ -37,7 +37,7 @@ Install the extension from this checkout:
 pi install ./packages/pi-kassette
 ```
 
-Start Pi normally, then use `/kassette` or `Ctrl+Shift+V`. The voice surface starts with the mic paused. `Space` toggles the mic, `Shift+Space` toggles auto-send, `Enter` sends the current transcript, `Backspace` removes the last finished utterance, `M` mutes playback, and `Escape` returns to Pi's editor.
+Start Pi normally, then use `/kassette` or `Ctrl+Shift+V`. The voice surface starts with the mic paused. `Space` toggles the mic, `M` mutes playback, and `Escape` returns to Pi's editor. In cascade mode, `Shift+Space` toggles auto-send, `Enter` sends the current transcript, and `Backspace` removes the last finished utterance. In Quicksilver mode, native turns delegate to Pi automatically, then Quicksilver speaks Pi's answer.
 
 The extension connects to `http://127.0.0.1:7860` and starts `kassette serve` when needed. Override those with `KASSETTE_URL` and `KASSETTE_COMMAND`. `KASSETTE_SHORTCUT` changes the activation binding. `KASSETTE_RECONNECT_MS`, `KASSETTE_AUTO_SEND=1`, and `KASSETTE_OUTPUT_MUTED=1` control the remaining client defaults. The service uses the system audio devices unless `KASSETTE_INPUT_DEVICE_INDEX` or `KASSETTE_OUTPUT_DEVICE_INDEX` is set.
 
@@ -100,7 +100,7 @@ Implemented:
 - optional deterministic transcript grooming through external profiles
 - Fish Audio streaming TTS for agent responses
 - local on-demand WAV generation for message playback through `POST /api/tts`
-- GPT-Live behind the isolated Quicksilver adapter
+- GPT-Live behind the isolated Quicksilver adapter, including delegated Pi terminal turns
 - generation-fenced runtime switching between cascade and Quicksilver without WebRTC renegotiation
 - provider discovery, readiness timeouts, rollback, sanitized diagnostics, interruption, and clean shutdown
 - automated reconnect, lifecycle, provider-switching, transcript, TTS, and failure-path coverage

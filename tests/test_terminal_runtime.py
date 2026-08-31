@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from kassette.domain import SessionEvent, SessionEventType, SessionState
+from kassette.domain import SessionEvent, SessionEventType, SessionState, TranscriptRole
 from kassette.sessions import SessionNotFoundError, SessionRegistry
 from kassette.terminal_runtime import (
     TerminalAudioLease,
@@ -40,6 +40,40 @@ async def test_desired_pause_is_retried_after_adapter_ready_and_only_then_acks_t
         message["type"]  # type: ignore[index]
         for message in runtime.messages
     ] == ["input.pause", "input.pause"]
+
+
+def test_quicksilver_delegation_and_transcript_reach_terminal_envelopes() -> None:
+    delegation = session_event_envelope(
+        SessionEvent(
+            session_id="voice",
+            type=SessionEventType.DELEGATION_REQUESTED,
+            text="inspect the repository",
+            metadata={"delegation_id": "delegation-1"},
+        )
+    )
+    transcript = session_event_envelope(
+        SessionEvent(
+            session_id="voice",
+            type=SessionEventType.TRANSCRIPT_FINAL,
+            role=TranscriptRole.ASSISTANT,
+            text="done",
+        )
+    )
+
+    assert delegation == {
+        "label": "kassette",
+        "type": "delegation.requested",
+        "data": {
+            "session_id": "voice",
+            "delegation_id": "delegation-1",
+            "text": "inspect the repository",
+        },
+    }
+    assert transcript == {
+        "label": "kassette",
+        "type": "transcript.final",
+        "data": {"session_id": "voice", "role": "assistant", "text": "done"},
+    }
 
 
 @pytest.mark.parametrize(

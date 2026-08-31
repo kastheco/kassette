@@ -5,7 +5,7 @@ import { KassetteClient, type ClientOptions } from "./client.js";
 import { TranscriptDraft } from "./draft.js";
 import { mergeEditorDraft, resetVoiceBuffers } from "./lifecycle.js";
 import { SpeechChunker } from "./speech.js";
-import { initialVoiceState, reduceVoiceState, type VoiceAction, type VoiceState } from "./state.js";
+import { initialVoiceState, reduceVoiceState, type ProviderMode, type VoiceAction, type VoiceState } from "./state.js";
 import { VoiceSurface } from "./ui.js";
 import type { Envelope } from "./protocol.js";
 
@@ -32,6 +32,8 @@ export function createPiKassette(
   let responseCaption = "";
   let suppressCurrentResponse = false;
   let outputPending = false;
+  let providerMode: ProviderMode = "cascaded";
+  let pendingDelegationId: string | undefined;
   let surface: VoiceSurface | undefined;
   let editorBeforeVoice = "";
   const draft = new TranscriptDraft();
@@ -67,6 +69,38 @@ export function createPiKassette(
       dispatch({ type: "connected" });
       client?.send(desiredInputPaused ? "input.pause" : "input.resume");
       if (state.outputMuted) client?.send("output.mute", { muted: true });
+    } else if (message.type === "provider.active") {
+      const capabilities = data.capabilities;
+      if (capabilities && typeof capabilities === "object" && !Array.isArray(capabilities)) {
+        const mode = (capabilities as Record<string, unknown>).mode;
+        if (mode === "native" || mode === "cascaded") {
+          providerMode = mode;
+          dispatch({ type: "provider-mode", mode });
+        }
+      }
+    } else if (message.type === "delegation.requested") {
+      const delegationId = data.delegation_id;
+      const text = data.text;
+      if (
+        providerMode === "native"
+        && typeof delegationId === "string"
+        && typeof text === "string"
+        && text.trim()
+        && ctx
+      ) {
+        pendingDelegationId = delegationId;
+        responseCaption = "";
+        speech.clear();
+        const delivery = transcriptDelivery(ctx.isIdle(), bargedIn);
+        dispatch({ type: "thinking" });
+        deliverVoiceTranscript(
+          text.trim(),
+          delivery,
+          (request, options) => pi.sendUserMessage(request, options),
+          () => undefined,
+        );
+        bargedIn = false;
+      }
     } else if (message.type === "input.audio_started") {
       if (outputPending || state.status === "speaking") client?.send("output.cancel");
       if (ctx && !ctx.isIdle()) {
@@ -83,8 +117,14 @@ export function createPiKassette(
         dispatch({ type: "level", direction, level });
       }
     } else if (message.type === "transcript.delta" || message.type === "transcript.final") {
-      const turnId = data.turn_id;
       const text = data.text;
+      if (providerMode === "native" && typeof text === "string") {
+        const final = message.type === "transcript.final";
+        if (data.role === "user") dispatch({ type: "transcript", text, final });
+        else if (data.role === "assistant") responseCaption = text;
+        return;
+      }
+      const turnId = data.turn_id;
       const sequence = data.sequence;
       if (typeof turnId === "string" && typeof text === "string" && typeof sequence === "number") {
         const final = message.type === "transcript.final";
@@ -105,6 +145,8 @@ export function createPiKassette(
       else if (data.state === "failed") dispatch({ type: "failed", error: "Kassette failed" });
     } else if (message.type === "session.interrupted") {
       outputPending = false;
+      pendingDelegationId = undefined;
+      suppressCurrentResponse = true;
       bargedIn = interruptForBargeIn(
         () => ctx?.abort(),
         () => speech.clear(),
@@ -133,6 +175,8 @@ export function createPiKassette(
     bargedIn = false;
     suppressCurrentResponse = false;
     outputPending = false;
+    providerMode = "cascaded";
+    pendingDelegationId = undefined;
     inputPaused = false;
     desiredInputPaused = true;
     editorBeforeVoice = "";
@@ -162,7 +206,9 @@ export function createPiKassette(
         desiredInputPaused = !desiredInputPaused;
         client?.send(desiredInputPaused ? "input.pause" : "input.resume");
       },
-      toggleAutoSend: () => dispatch({ type: "toggle-auto-send" }),
+      toggleAutoSend: () => {
+        if (providerMode === "cascaded") dispatch({ type: "toggle-auto-send" });
+      },
       submit,
       undo: () => {
         draft.undoFinal();
@@ -217,15 +263,28 @@ export function createPiKassette(
     speech.clear();
     dispatch({ type: "thinking" });
   });
+  pi.on("message_start", (event) => {
+    if (!active || event.message.role !== "assistant") return;
+    responseCaption = "";
+    speech.clear();
+  });
   pi.on("message_update", (event) => {
     if (!active || suppressCurrentResponse || event.assistantMessageEvent.type !== "text_delta") return;
     const delta = event.assistantMessageEvent.delta;
     responseCaption += delta;
-    speech.push(delta);
+    if (providerMode === "cascaded") speech.push(delta);
   });
-  pi.on("message_end", () => {
+  pi.on("agent_settled", () => {
     if (!active) return;
-    if (suppressCurrentResponse) {
+    if (providerMode === "native") {
+      if (pendingDelegationId && responseCaption.trim()) {
+        client?.send("delegation.complete", {
+          delegation_id: pendingDelegationId,
+          text: responseCaption.trim().slice(0, 32_000),
+        });
+        pendingDelegationId = undefined;
+      }
+    } else if (suppressCurrentResponse) {
       speech.clear();
     } else {
       const [reply] = speech.finish();

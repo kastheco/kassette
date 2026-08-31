@@ -35,7 +35,7 @@ Auto-send starts off and is always visible. A pause in speech finishes an uttera
 
 Speaking while Pi is talking is a barge-in. Kassette stops current and queued audio immediately, then the finished utterance steers the running Pi turn. Speech that finishes while Pi is busy without a detected barge-in stays as a draft.
 
-Pi's answer should start speaking before the whole response is done, but only in finished sentence-sized chunks. Don't read tool payloads, reasoning, code blocks, empty text, or raw Markdown noise. Keep Pi's saved assistant message intact after an interruption even if the user didn't hear all of it.
+In cascade mode, send one complete Pi answer to TTS so sentence boundaries keep natural pacing. In Quicksilver mode, return the complete Pi answer through the matching native delegation and let Quicksilver render it as speech. Don't read tool payloads, reasoning, empty text, or raw Markdown noise. Keep Pi's saved assistant message intact after an interruption even if the user didn't hear all of it.
 
 ## The boundary
 
@@ -45,7 +45,7 @@ Add a loopback terminal-session API and a bidirectional control channel to the K
 
 Each session gets a short-lived random token. The extension and service check protocol versions and required capabilities before taking the audio lease. If the running service is incompatible, show the mismatch. Don't start a second service and let both fight over the same devices.
 
-Pi voice sessions use the cascade path. Pi owns reasoning and durable history. Quicksilver's built-in reasoning is not part of this version.
+Pi voice sessions may use cascade or Quicksilver. Pi owns reasoning, tools, and durable history in both modes. Cascade sends transcripts to Pi and speaks Pi's completed text through Fish. Quicksilver delegates each request to Pi, receives the matching Pi answer as bounded client context, and renders the speech natively. Quicksilver's built-in reasoning stays disabled in Pi mode.
 
 ## The extension
 
@@ -67,9 +67,10 @@ Use red-green TDD around the boundaries we agreed on:
 2. terminal-session and audio-lease lifecycle
 3. transcript ordering, deduplication, undo, and editor handoff
 4. idle, busy, auto-send, and barge-in behavior
-5. sentence chunking and speech filtering
-6. voice-surface state changes and keys
-7. process ownership, reconnect fencing, and cleanup
+5. complete-response buffering and speech filtering
+6. Quicksilver delegation request and response pairing
+7. voice-surface state changes and provider-specific keys
+8. process ownership, reconnect fencing, and cleanup
 
 Run focused tests and typechecks while each slice is being built. Run both full suites at the end. Test semantic UI output instead of freezing whole ANSI frames.
 
@@ -81,7 +82,7 @@ The automated checks need to pass, but this isn't done until the real path works
 2. see real mic levels move
 3. watch interim text become a finished draft
 4. send it as a real Pi message
-5. see and hear Pi's response in sentence-sized chunks
+5. see and hear Pi's response through the selected provider
 6. speak over Pi and stop both playback and the active turn
 7. pause and resume with `Space`
 8. toggle auto-send with `Shift+Space`
@@ -92,4 +93,4 @@ If the current environment can't run the physical audio check, record exactly wh
 
 ## Not in this version
 
-No macOS or Windows support, browser companion, remote Kassette connection, device picker, arbitrary editing inside the voice surface, Quicksilver reasoning, Orca bridge, assistant-message rewriting, or npm release.
+No macOS or Windows support, browser companion, remote Kassette connection, device picker, arbitrary editing inside the voice surface, direct Quicksilver reasoning inside Pi, Orca bridge, assistant-message rewriting, or npm release.

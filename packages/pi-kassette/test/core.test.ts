@@ -179,6 +179,16 @@ describe("voice surface", () => {
     expect(reduceVoiceState(connected, { type: "input-paused" }).status).toBe("mic paused");
   });
 
+  it("shows native delegation controls without cascade send controls", () => {
+    const native = reduceVoiceState(initialVoiceState(), { type: "provider-mode", mode: "native" });
+    const surface = renderVoiceSurface(native, 60, 1_000).join("\n");
+
+    expect(surface).toContain("native voice");
+    expect(surface).not.toContain("auto-send");
+    expect(surface).not.toContain("⇧space auto");
+    expect(surface).not.toContain("↵ send");
+  });
+
   it("shows semantic state and real levels, then preserves draft on exit", () => {
     let state = reduceVoiceState(initialVoiceState(), { type: "connected" });
     state = reduceVoiceState(state, { type: "input-resumed" });

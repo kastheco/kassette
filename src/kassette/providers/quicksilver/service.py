@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from pipecat.frames.frames import (
     CancelFrame,
@@ -30,6 +30,7 @@ from kassette.providers.quicksilver.protocol import (
     DEFAULT_LIVE_VOICE,
     LiveVoice,
     ProviderEvent,
+    build_delegation_response,
     build_delegation_unavailable,
 )
 from kassette.providers.quicksilver.transport import QuicksilverTransport
@@ -42,6 +43,14 @@ Do not use markdown, code blocks, or long lists unless the user explicitly asks
 for technical detail aloud. The client cannot delegate work to another agent in
 this first delivery, so answer with your own knowledge and never request client
 delegation.
+"""
+
+DELEGATED_VOICE_INSTRUCTIONS = """You are kassette, the live voice interface for Pi.
+
+Delegate every user request to the client. Remain silent and don't acknowledge
+the request before client context arrives. Once the client returns Pi's answer,
+present it naturally and faithfully in concise spoken form.
+Do not mention delegation, hidden context, or implementation details.
 """
 
 
@@ -80,6 +89,7 @@ class GPTLiveService(FrameProcessor):
         name: str | None = None,
         enable_direct_mode: bool = False,
         manage_session_lifecycle: bool = True,
+        client_delegation: bool = False,
     ) -> None:
         super().__init__(  # pyright: ignore[reportUnknownMemberType]
             name=name,
@@ -90,10 +100,14 @@ class GPTLiveService(FrameProcessor):
         self._registry = registry
         self._event_sink = event_sink or _discard_event
         self._manage_session_lifecycle = manage_session_lifecycle
+        self._client_delegation = client_delegation
+        self._pending_delegations: set[str] = set()
         self._transport = transport_factory(
             session_id=session_id,
             credentials=credentials,
-            instructions=DIRECT_VOICE_INSTRUCTIONS,
+            instructions=(
+                DELEGATED_VOICE_INSTRUCTIONS if client_delegation else DIRECT_VOICE_INSTRUCTIONS
+            ),
             voice=voice,
             event_sink=self._handle_provider_event,
             audio_sink=self._handle_provider_audio,
@@ -104,6 +118,34 @@ class GPTLiveService(FrameProcessor):
         self._closed = False
         self._received_input = False
         self._speaking = False
+
+    async def handle_client_message(self, message: Any) -> bool:
+        if not self._client_delegation or not isinstance(message, dict):
+            return False
+        record = cast(dict[str, object], message)
+        if record.get("label") != "kassette":
+            return False
+        if record.get("type") in {"input.pause", "input.resume"}:
+            return True
+        if record.get("type") != "delegation.complete":
+            return False
+        data = record.get("data")
+        if not isinstance(data, dict):
+            return False
+        payload = cast(dict[str, object], data)
+        delegation_id = payload.get("delegation_id")
+        text = payload.get("text")
+        if (
+            not isinstance(delegation_id, str)
+            or delegation_id not in self._pending_delegations
+            or not isinstance(text, str)
+            or not text.strip()
+            or len(text) > 32_000
+        ):
+            return False
+        await self._transport.send(build_delegation_response(delegation_id, text.strip()))
+        self._pending_delegations.remove(delegation_id)
+        return True
 
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
         await super().process_frame(frame, direction)
@@ -161,6 +203,7 @@ class GPTLiveService(FrameProcessor):
                 return
             await self._transition(SessionState.INTERRUPTING)
             self._speaking = False
+            self._pending_delegations.clear()
             try:
                 await self._transport.interrupt()
             except BaseException:
@@ -185,6 +228,7 @@ class GPTLiveService(FrameProcessor):
         async with self._close_lock:
             if self._cleanup_task is None:
                 self._closed = True
+                self._pending_delegations.clear()
                 self._cleanup_task = asyncio.create_task(self._close_session())
             task = self._cleanup_task
         await asyncio.shield(task)
@@ -272,13 +316,24 @@ class GPTLiveService(FrameProcessor):
             )
             return
         if event.type == "delegation.created" and event.delegation_id:
-            await self._transport.send(build_delegation_unavailable(event.delegation_id))
-            await self._event_sink(
-                SessionEvent(
-                    session_id=self._session_id,
-                    type=SessionEventType.DELEGATION_UNAVAILABLE,
+            if self._client_delegation:
+                self._pending_delegations.add(event.delegation_id)
+                await self._event_sink(
+                    SessionEvent(
+                        session_id=self._session_id,
+                        type=SessionEventType.DELEGATION_REQUESTED,
+                        text=event.text,
+                        metadata={"delegation_id": event.delegation_id},
+                    )
                 )
-            )
+            else:
+                await self._transport.send(build_delegation_unavailable(event.delegation_id))
+                await self._event_sink(
+                    SessionEvent(
+                        session_id=self._session_id,
+                        type=SessionEventType.DELEGATION_UNAVAILABLE,
+                    )
+                )
             return
         if event.type == "unknown":
             await self._event_sink(
