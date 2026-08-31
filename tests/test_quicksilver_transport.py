@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from typing import Any, ClassVar
+from typing import Any, ClassVar, cast
 
 import pytest
+from aiortc import MediaStreamTrack
 from aiortc.mediastreams import MediaStreamError
+from av import AudioFrame
 from pytest import MonkeyPatch
 
 from kassette.credentials import CodexCredentials
@@ -75,6 +77,23 @@ class EndedAudioTrack:
 
     async def recv(self) -> None:
         raise MediaStreamError
+
+
+class OneFrameAudioTrack:
+    kind = "audio"
+
+    def __init__(self) -> None:
+        frame = AudioFrame(format="s16", layout="mono", samples=480)
+        frame.planes[0].update(b"\x64\x00" * 480)
+        frame.sample_rate = 24_000
+        self.frame: AudioFrame | None = frame
+
+    async def recv(self) -> AudioFrame:
+        if self.frame is None:
+            raise MediaStreamError
+        frame = self.frame
+        self.frame = None
+        return frame
 
 
 class HangingSideband:
@@ -341,6 +360,71 @@ async def _open_connected_transport(
     await transport.open()
     assert FakePeer.latest is not None
     return transport, FakePeer.latest
+
+
+async def test_rtp_audio_remains_active_when_sideband_carries_only_control() -> None:
+    events: list[ProviderEvent] = []
+    audio: list[AudioChunk] = []
+
+    async def collect_event(event: ProviderEvent) -> None:
+        events.append(event)
+
+    async def collect_audio(chunk: AudioChunk) -> None:
+        audio.append(chunk)
+
+    transport = QuicksilverTransport(
+        session_id="voice-1",
+        credentials=FakeCredentials(),
+        instructions="test",
+        voice="sol",
+        event_sink=collect_event,
+        audio_sink=collect_audio,
+    )
+    transport._sideband = HangingSideband()  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
+
+    await transport._read_remote_audio(  # pyright: ignore[reportPrivateUsage]
+        cast(MediaStreamTrack, OneFrameAudioTrack())
+    )
+
+    assert events[0].type == "output_audio.delta"
+    assert len(audio) == 1
+    assert audio[0].audio
+
+
+async def test_sideband_audio_is_not_duplicated_when_rtp_is_active() -> None:
+    events: list[ProviderEvent] = []
+    audio: list[AudioChunk] = []
+
+    async def collect_event(event: ProviderEvent) -> None:
+        events.append(event)
+
+    async def collect_audio(chunk: AudioChunk) -> None:
+        audio.append(chunk)
+
+    transport = QuicksilverTransport(
+        session_id="voice-1",
+        credentials=FakeCredentials(),
+        instructions="test",
+        voice="sol",
+        event_sink=collect_event,
+        audio_sink=collect_audio,
+    )
+    transport._rtp_audio_active = True  # pyright: ignore[reportPrivateUsage]
+    event = ProviderEvent(
+        type="output_audio.delta",
+        audio=b"\x64\x00",
+        sample_rate=24_000,
+        num_channels=1,
+    )
+
+    await transport._dispatch_provider_event(event)  # pyright: ignore[reportPrivateUsage]
+    await transport._dispatch_provider_event(  # pyright: ignore[reportPrivateUsage]
+        event,
+        audio_source="rtp",
+    )
+
+    assert [item.type for item in events] == ["output_audio.delta", "output_audio.delta"]
+    assert len(audio) == 1
 
 
 async def test_transport_cleanup_survives_independent_cancelled_error(

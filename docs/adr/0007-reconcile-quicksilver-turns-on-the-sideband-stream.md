@@ -28,7 +28,7 @@ Treat the finalized user transcript as the request boundary:
 8. Suppress provider output until the delegated client response starts. Arm response ownership before writing the delegated answer so an immediate first audio delta cannot race ahead and be discarded. If unauthorized direct output has already begun when a synthetic completion arrives, request interruption and continue blocking that turn's audio before sending the delegated answer. Client completion alone does not authorize audio from the discarded direct answer.
 9. Clear active, deferred, and unresolved turn state on interruption or teardown.
 
-Use the ordered sideband stream as the source of Quicksilver control events and output audio. Convert sideband audio frames into the Pipecat audio path. Continue draining the mirrored WebRTC remote track so transport backpressure cannot stall the provider, but do not forward that duplicate track to clients.
+Use the ordered sideband stream as the source of Quicksilver control events. Use the WebRTC remote track as the primary output-audio source because live frameless sessions can carry transcripts and control acknowledgements on the sideband without carrying audio payloads there. Feed each RTP audio frame through the same serialized provider-event dispatcher before forwarding its PCM so response authorization is established before playback. Accept sideband audio only when no RTP audio track is active, preventing duplicate playback when both transports carry PCM.
 
 Clients treat delegation IDs as opaque and return them unchanged. Synthetic IDs are an internal recovery mechanism, not a second client protocol.
 
@@ -41,6 +41,6 @@ Clients treat delegation IDs as opaque and return them unchanged. Synthetic IDs 
 - A synthetic completion cannot remain silent forever while waiting for a provider event that may never arrive.
 - Direct provider audio stays blocked until the delegated response begins; interruption is requested for an in-flight unauthorized turn, but audio blocking remains the enforcement boundary.
 - The first delegated audio frame is authorized even when it arrives reentrantly with the response write.
-- Audio, transcript, delegation, and interruption events share one ordered source before entering Pipecat.
-- The mirrored WebRTC audio track still consumes network and decode work, but it is drained rather than forwarded.
-- Automated tests cover the ordering and reconciliation contracts. Physical microphone input, audible playback, and barge-in still require manual validation.
+- Transcript, delegation, and interruption events keep sideband ordering; RTP audio re-enters the serialized provider dispatcher at the playback boundary.
+- RTP remains audible while the sideband carries control-only traffic, and sideband PCM remains a fallback rather than a duplicate source.
+- Automated tests cover the ordering and reconciliation contracts. A headless live probe covers native input, provider context, and returned audio bytes; physical speaker playback and barge-in still require manual validation.

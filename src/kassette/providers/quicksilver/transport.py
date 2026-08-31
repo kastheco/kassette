@@ -127,6 +127,7 @@ class QuicksilverTransport:
         self._sideband: aiohttp.ClientWebSocketResponse | None = None
         self._sideband_task: asyncio.Task[None] | None = None
         self._remote_audio_tasks: set[asyncio.Task[None]] = set()
+        self._rtp_audio_active = False
         self._event_tasks: set[asyncio.Future[None]] = set()
         self._event_dispatch_lock = asyncio.Lock()
         self._connected = False
@@ -272,11 +273,13 @@ class QuicksilverTransport:
         def on_track(track: MediaStreamTrack) -> None:
             if track.kind != "audio":
                 return
+            self._rtp_audio_active = True
             task = asyncio.create_task(self._read_remote_audio(track))
             self._remote_audio_tasks.add(task)
 
             def finish(completed: asyncio.Task[None]) -> None:
                 self._remote_audio_tasks.discard(completed)
+                self._rtp_audio_active = bool(self._remote_audio_tasks)
                 if not completed.cancelled():
                     completed.exception()
 
@@ -297,25 +300,34 @@ class QuicksilverTransport:
                 for output in resampler.resample(frame):
                     size = output.samples * 2
                     audio = bytes(output.planes[0])[:size]
-                    # The sideband carries the same PCM inside ordered output_audio.delta
-                    # events. Use RTP only as a pre-sideband fallback to avoid duplicates and
-                    # keep response ownership aligned with the control-event sequence.
-                    if audio and (self._sideband is None or self._sideband.closed):
-                        await self._audio_sink(
-                            AudioChunk(audio=audio, sample_rate=24_000, num_channels=1)
+                    if audio:
+                        await self._dispatch_provider_event(
+                            ProviderEvent(
+                                type="output_audio.delta",
+                                audio=audio,
+                                sample_rate=24_000,
+                                num_channels=1,
+                            ),
+                            audio_source="rtp",
                         )
         except asyncio.CancelledError:
             return
         except MediaStreamError:
             await self._report_disconnect()
 
-    async def _dispatch_provider_event(self, event: ProviderEvent) -> None:
+    async def _dispatch_provider_event(
+        self,
+        event: ProviderEvent,
+        *,
+        audio_source: str = "sideband",
+    ) -> None:
         async with self._event_dispatch_lock:
             await self._event_sink(event)
             if (
                 event.audio is not None
                 and event.sample_rate is not None
                 and event.num_channels is not None
+                and (audio_source == "rtp" or not self._rtp_audio_active)
             ):
                 await self._audio_sink(
                     AudioChunk(
