@@ -37,6 +37,7 @@ class FakeTransport:
         self.voice = _kwargs["voice"]
         self.sent_audio: list[AudioChunk] = []
         self.sent_messages: list[dict[str, Any]] = []
+        self.send_hook: Callable[[], Awaitable[None]] | None = None
         self.interrupted = False
         self.closed = False
         self.open_error: Exception | None = None
@@ -52,6 +53,8 @@ class FakeTransport:
 
     async def send(self, message: dict[str, Any]) -> None:
         self.sent_messages.append(message)
+        if self.send_hook is not None:
+            await self.send_hook()
 
     async def interrupt(self) -> None:
         if self.interrupt_error is not None:
@@ -237,6 +240,66 @@ async def test_client_delegation_falls_back_before_direct_provider_answer() -> N
 
     await transport.event_sink(ProviderEvent(type="output_audio.delta"))
     await transport.audio_sink(AudioChunk(audio=b"\x64\x00", sample_rate=24_000, num_channels=1))
+    assert any(isinstance(frame, OutputAudioRawFrame) for frame, _ in service.pushed_frames)
+
+
+async def test_synthetic_completion_authorizes_immediate_provider_audio() -> None:
+    registry = SessionRegistry()
+    await registry.create("voice-1")
+    events: list[SessionEvent] = []
+    transports: list[FakeTransport] = []
+
+    def create_transport(**kwargs: Any) -> FakeTransport:
+        transport = FakeTransport(**kwargs)
+        transports.append(transport)
+        return transport
+
+    async def collect(event: SessionEvent) -> None:
+        events.append(event)
+
+    service = RecordingGPTLiveService(
+        session_id="voice-1",
+        registry=registry,
+        credentials=FakeCredentials(),
+        event_sink=collect,
+        transport_factory=create_transport,
+        client_delegation=True,
+    )
+    await service._start_session()  # pyright: ignore[reportPrivateUsage]
+    transport = transports[0]
+
+    await transport.event_sink(
+        ProviderEvent(type="input_transcript.added", role="user", text="speak now")
+    )
+    await transport.event_sink(ProviderEvent(type="turn.done", role="user", text="speak now"))
+    request = next(
+        event for event in events if event.type is SessionEventType.DELEGATION_REQUESTED
+    )
+    delegation_id = request.metadata["delegation_id"]
+    assert isinstance(delegation_id, str)
+
+    async def emit_immediate_audio() -> None:
+        await transport.event_sink(
+            ProviderEvent(
+                type="output_audio.delta",
+                audio=b"\x64\x00",
+                sample_rate=24_000,
+                num_channels=1,
+            )
+        )
+        await transport.audio_sink(
+            AudioChunk(audio=b"\x64\x00", sample_rate=24_000, num_channels=1)
+        )
+
+    transport.send_hook = emit_immediate_audio
+    assert await service.handle_client_message(
+        {
+            "label": "kassette",
+            "type": "delegation.complete",
+            "data": {"delegation_id": delegation_id, "text": "Immediate answer."},
+        }
+    )
+
     assert any(isinstance(frame, OutputAudioRawFrame) for frame, _ in service.pushed_frames)
 
 

@@ -227,10 +227,15 @@ class GPTLiveService(FrameProcessor):
                 self._unauthorized_output_active = False
             await self._flush_synthetic_response()
             return True
-        await self._transport.send(build_delegation_response(delegation_id, answer))
         self._active_response_delegation_id = delegation_id
         self._awaiting_client_output_start = True
         self._client_output_authorized = False
+        try:
+            await self._transport.send(build_delegation_response(delegation_id, answer))
+        except BaseException:
+            self._active_response_delegation_id = None
+            self._awaiting_client_output_start = False
+            raise
         return True
 
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
@@ -652,11 +657,16 @@ class GPTLiveService(FrameProcessor):
             if delegation.real_id is not None
             else build_spoken_context(delegation.answer)
         )
-        await self._transport.send(message)
-        delegation.response_sent = True
         self._active_response_delegation_id = delegation.client_id
         self._awaiting_client_output_start = True
         self._client_output_authorized = False
+        try:
+            await self._transport.send(message)
+        except BaseException:
+            self._active_response_delegation_id = None
+            self._awaiting_client_output_start = False
+            raise
+        delegation.response_sent = True
 
     def _authorize_client_output_start(self) -> None:
         if (
