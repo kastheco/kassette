@@ -215,7 +215,7 @@ describe("voice surface", () => {
     expect(lines.join("\n")).toContain("you  › testing");
     expect(lines.join("\n")).toMatch(/[█▆▃]/);
     expect(lines.at(-1)).toContain("space mic");
-    expect(renderVoiceSurface(state, 48, 2_600).join("\n")).toContain("audio signal lost");
+    expect(renderVoiceSurface(state, 48, 2_600).join("\n")).not.toContain("mic levels delayed");
 
     const quietMic = reduceVoiceState(state, { type: "level", direction: "input", level: 0.006, at: 3_000 });
     expect(renderVoiceSurface(quietMic, 48, 3_010).join("\n")).toMatch(/[▂▃▄▅▆▇█]/);
@@ -224,5 +224,47 @@ describe("voice surface", () => {
     const speakingSurface = renderVoiceSurface(speaking, 48, 3_020).join("\n");
     expect(speakingSurface).not.toContain("assistant reply stays in chat");
     expect(speakingSurface).toContain("space stop");
+  });
+
+  it("warns about delayed mic telemetry only while idle listening", () => {
+    const style = {
+      accent: (text: string) => text,
+      text: (text: string) => text,
+      muted: (text: string) => text,
+      success: (text: string) => text,
+      warning: (text: string) => `[warning]${text}[/warning]`,
+      error: (text: string) => `[error]${text}[/error]`,
+      bold: (text: string) => text,
+    };
+    let listening = reduceVoiceState(initialVoiceState(), { type: "input-resumed" });
+    listening = reduceVoiceState(listening, {
+      type: "level",
+      direction: "input",
+      level: 0,
+      at: 1_000,
+    });
+
+    const stale = renderVoiceSurface(listening, 48, 7_000, style).join("\n");
+    expect(stale).toContain("[warning]");
+    expect(stale).toContain("mic levels delayed");
+    expect(stale).not.toContain("[error]");
+
+    const waiting = reduceVoiceState(listening, {
+      type: "transcript",
+      text: "waiting for the response",
+      final: true,
+    });
+    expect(renderVoiceSurface(waiting, 48, 7_000, style).join("\n")).not.toContain(
+      "mic levels delayed",
+    );
+
+    const transcribing = reduceVoiceState(listening, {
+      type: "transcript",
+      text: "still speaking",
+      final: false,
+    });
+    expect(renderVoiceSurface(transcribing, 48, 7_000, style).join("\n")).not.toContain(
+      "mic levels delayed",
+    );
   });
 });

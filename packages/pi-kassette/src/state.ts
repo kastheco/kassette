@@ -124,8 +124,10 @@ export function renderVoiceSurface(
   const innerWidth = panelWidth - 4;
   const activeOutput = state.status === "speaking";
   const level = activeOutput ? state.outputLevel : state.inputLevel;
-  const inputActive = state.status === "listening" || state.status === "transcribing";
-  const inputStale = inputActive && now - state.lastInputLevelAt > 1_500;
+  const inputStale = state.status === "listening"
+    && !state.transcript
+    && state.lastInputLevelAt > 0
+    && now - state.lastInputLevelAt > 5_000;
   const color = statusColor(state.status, style);
   const status = state.status.toUpperCase();
   const dot = inputStale ? "○" : state.status === "mic paused" ? "Ⅱ" : "●";
@@ -134,10 +136,10 @@ export function renderVoiceSurface(
   const topFill = Math.max(0, panelWidth - titleRaw.length - 2);
   const lines = [`${style.accent("╭")}${title}${style.accent("─".repeat(topFill))}${style.accent("╮")}`];
 
-  const visualRaw = inputStale ? "audio signal lost" : spectrum(level, Math.min(48, innerWidth), now / 120);
+  const visualRaw = inputStale ? "mic levels delayed" : spectrum(level, Math.min(48, innerWidth), now / 120);
   const visualPad = Math.max(0, Math.floor((innerWidth - visualRaw.length) / 2));
   const visualContent = `${" ".repeat(visualPad)}${visualRaw}`;
-  lines.push(frameLine(visualContent, inputStale ? style.error(visualContent) : style.accent(visualContent), innerWidth, style));
+  lines.push(frameLine(visualContent, inputStale ? style.warning(visualContent) : style.accent(visualContent), innerWidth, style));
 
   const sendMode = state.autoSend ? "auto-send" : "manual send";
   const modeRaw = state.providerMode === "native"
