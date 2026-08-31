@@ -9,6 +9,7 @@ from kassette.terminal_runtime import (
     TerminalInputControl,
     close_terminal_session,
     session_event_envelope,
+    terminal_output_active_for_event,
 )
 
 
@@ -106,6 +107,12 @@ def test_runtime_speech_and_barge_in_events_reach_terminal_envelopes(
             "provider_generation": 2,
         },
     }
+
+
+def test_delegation_request_reopens_terminal_input_after_stale_speaking_event() -> None:
+    assert terminal_output_active_for_event(SessionEventType.SPEECH_STARTED) is True
+    assert terminal_output_active_for_event(SessionEventType.DELEGATION_REQUESTED) is False
+    assert terminal_output_active_for_event(SessionEventType.SPEECH_STOPPED) is False
 
 
 async def test_terminal_audio_lease_acquires_closes_releases_and_reaps() -> None:

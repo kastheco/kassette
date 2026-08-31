@@ -148,6 +148,19 @@ class TerminalAudioLease:
         )
 
 
+def terminal_output_active_for_event(event_type: SessionEventType) -> bool | None:
+    """Map provider speech events onto terminal microphone gating."""
+    if event_type is SessionEventType.SPEECH_STARTED:
+        return True
+    if event_type in {
+        SessionEventType.SPEECH_STOPPED,
+        SessionEventType.INTERRUPTED,
+        SessionEventType.DELEGATION_REQUESTED,
+    }:
+        return False
+    return None
+
+
 def session_event_envelope(event: SessionEvent) -> dict[str, object] | None:
     """Map runtime events needed by terminal clients onto the shared envelope."""
     if event.type not in {
@@ -227,10 +240,9 @@ async def run_terminal_voice_session(
         nonlocal active_provider
         if event.type is SessionEventType.PROVIDER_ACTIVE and event.provider_type is not None:
             active_provider = event.provider_type
-        if event.type is SessionEventType.SPEECH_STARTED:
-            await input_processor.set_output_active(True)
-        elif event.type in {SessionEventType.SPEECH_STOPPED, SessionEventType.INTERRUPTED}:
-            await input_processor.set_output_active(False)
+        output_active = terminal_output_active_for_event(event.type)
+        if output_active is not None:
+            await input_processor.set_output_active(output_active)
         message = session_event_envelope(event)
         is_transcript = event.type in {
             SessionEventType.TRANSCRIPT_DELTA,

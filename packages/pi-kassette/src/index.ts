@@ -34,6 +34,7 @@ export function createPiKassette(
   let outputPending = false;
   let providerMode: ProviderMode = "cascaded";
   let pendingDelegationId: string | undefined;
+  let pendingDelegationText: string | undefined;
   let surface: VoiceSurface | undefined;
   let editorBeforeVoice = "";
   const draft = new TranscriptDraft();
@@ -44,7 +45,28 @@ export function createPiKassette(
     surface?.invalidate();
   };
 
+  const submitNativeDelegation = (): void => {
+    if (!pendingDelegationId || !pendingDelegationText || !ctx) return;
+    const text = pendingDelegationText;
+    pendingDelegationText = undefined;
+    responseCaption = "";
+    speech.clear();
+    const delivery = transcriptDelivery(ctx.isIdle(), bargedIn);
+    dispatch({ type: "thinking" });
+    deliverVoiceTranscript(
+      text,
+      delivery,
+      (message, options) => pi.sendUserMessage(message, options),
+      () => undefined,
+    );
+    bargedIn = false;
+  };
+
   const submit = (): void => {
+    if (providerMode === "native") {
+      submitNativeDelegation();
+      return;
+    }
     if (!draft.text || !ctx) return;
     const delivery = transcriptDelivery(ctx.isIdle(), bargedIn);
     const text = draft.consumeAll();
@@ -89,17 +111,11 @@ export function createPiKassette(
         && ctx
       ) {
         pendingDelegationId = delegationId;
+        pendingDelegationText = text.trim();
         responseCaption = "";
         speech.clear();
-        const delivery = transcriptDelivery(ctx.isIdle(), bargedIn);
-        dispatch({ type: "thinking" });
-        deliverVoiceTranscript(
-          text.trim(),
-          delivery,
-          (request, options) => pi.sendUserMessage(request, options),
-          () => undefined,
-        );
-        bargedIn = false;
+        dispatch({ type: "transcript", text: pendingDelegationText, final: true });
+        if (state.autoSend) submitNativeDelegation();
       }
     } else if (message.type === "input.audio_started") {
       if (outputPending || state.status === "speaking") client?.send("output.cancel");
@@ -146,6 +162,7 @@ export function createPiKassette(
     } else if (message.type === "session.interrupted") {
       outputPending = false;
       pendingDelegationId = undefined;
+      pendingDelegationText = undefined;
       suppressCurrentResponse = true;
       bargedIn = interruptForBargeIn(
         () => ctx?.abort(),
@@ -177,6 +194,7 @@ export function createPiKassette(
     outputPending = false;
     providerMode = "cascaded";
     pendingDelegationId = undefined;
+    pendingDelegationText = undefined;
     inputPaused = false;
     desiredInputPaused = true;
     editorBeforeVoice = "";
@@ -207,10 +225,12 @@ export function createPiKassette(
         client?.send(desiredInputPaused ? "input.pause" : "input.resume");
       },
       toggleAutoSend: () => {
-        if (providerMode === "cascaded") dispatch({ type: "toggle-auto-send" });
+        dispatch({ type: "toggle-auto-send" });
+        if (providerMode === "native" && state.autoSend) submitNativeDelegation();
       },
       submit,
       undo: () => {
+        if (providerMode === "native") return;
         draft.undoFinal();
         dispatch({ type: "transcript", text: draft.text, final: true });
       },
@@ -283,6 +303,7 @@ export function createPiKassette(
           text: responseCaption.trim().slice(0, 32_000),
         });
         pendingDelegationId = undefined;
+        pendingDelegationText = undefined;
       }
     } else if (suppressCurrentResponse) {
       speech.clear();

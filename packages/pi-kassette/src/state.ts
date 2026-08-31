@@ -139,9 +139,10 @@ export function renderVoiceSurface(
   const visualContent = `${" ".repeat(visualPad)}${visualRaw}`;
   lines.push(frameLine(visualContent, inputStale ? style.error(visualContent) : style.accent(visualContent), innerWidth, style));
 
+  const sendMode = state.autoSend ? "auto-send" : "manual send";
   const modeRaw = state.providerMode === "native"
-    ? `${activeOutput ? "output" : "input"}  native voice  ·  ${state.outputMuted ? "muted" : "sound on"}`
-    : `${activeOutput ? "output" : "input"}  ${state.autoSend ? "auto-send" : "manual send"}  ·  ${state.outputMuted ? "muted" : "sound on"}`;
+    ? `${activeOutput ? "output" : "input"}  native voice  ·  ${sendMode}  ·  ${state.outputMuted ? "muted" : "sound on"}`
+    : `${activeOutput ? "output" : "input"}  ${sendMode}  ·  ${state.outputMuted ? "muted" : "sound on"}`;
   lines.push(frameLine(modeRaw, style.muted(modeRaw), innerWidth, style));
 
   const transcriptRaw = state.transcript ? `you  › ${tail(state.transcript, innerWidth - 7)}` : state.status === "mic paused" ? "you  › mic paused" : "you  › say something…";
@@ -157,9 +158,7 @@ export function renderVoiceSurface(
 
   const hintsRaw = state.status === "speaking"
     ? "space stop · m mute · esc text"
-    : state.providerMode === "native"
-      ? "space mic · m mute · esc text"
-      : "space mic · ⇧space auto · ↵ send · m · esc";
+    : "space mic · ⇧space auto · ↵ send · m · esc";
   const hints = hintsRaw.slice(0, innerWidth);
   lines.push(`${style.accent("╰─")}${style.muted(` ${hints} `)}${style.accent("─".repeat(Math.max(0, panelWidth - hints.length - 4)))}${style.accent("╯")}`);
   return lines;

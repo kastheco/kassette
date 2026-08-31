@@ -38,6 +38,7 @@ function harness(idle = true): {
   getAbortCount: () => number;
   setIdle: (value: boolean) => void;
   getEditorText: () => string;
+  render: () => string[];
   shutdown: () => Promise<void>;
 } {
   const handlers = new Map<string, Handler[]>();
@@ -120,6 +121,7 @@ function harness(idle = true): {
     getAbortCount: () => abortCount,
     setIdle: (value) => { currentlyIdle = value; },
     getEditorText: () => editorText,
+    render: () => ensureSurface().render(80),
     shutdown: async () => {
       for (const handler of handlers.get("session_shutdown") ?? []) await handler({}, context);
     },
@@ -256,6 +258,30 @@ describe.sequential("pi-kassette extension delivery", () => {
       ["output.cancel", {}],
     ]);
     expect(app.getAbortCount()).toBe(0);
+    await app.shutdown();
+  });
+
+  it("switches native Quicksilver turns to manual send and clears stale speaking", async () => {
+    const app = harness(true);
+    await app.command();
+    app.emit("provider.active", {
+      provider_id: "quicksilver",
+      capabilities: { mode: "native" },
+    });
+
+    app.press("\u001b[32;2u");
+    app.emit("speech.started", {});
+    app.emit("delegation.requested", {
+      delegation_id: "delegation-manual",
+      text: "wait for enter",
+    });
+
+    expect(app.sentMessages).toEqual([]);
+    expect(app.render().join("\n")).toContain("LISTENING");
+    expect(app.render().join("\n")).toContain("manual send");
+
+    app.press("\r");
+    expect(app.sentMessages).toEqual([["wait for enter", undefined]]);
     await app.shutdown();
   });
 

@@ -22,16 +22,19 @@ The waveform can't be fake. If level data stops, show that instead of animating 
 
 ### Keys
 
+Both provider modes use:
+
 - configured shortcut or `/kassette`: enter or leave
 - `Space`: pause or resume the mic
 - `Shift+Space`: toggle auto-send
-- `Enter`: send the current transcript
-- `Backspace`: remove the last finished utterance
+- `Enter`: send the current transcript or native delegation
 - `M`: mute or unmute response audio
 - Pi's cancel key: stop speech and interrupt the active Pi turn
 - `Escape`: end voice and return to the normal editor
 
-Auto-send starts off and is always visible. A pause in speech finishes an utterance. It doesn't send unless auto-send is on. Finished utterances build one draft until they are sent or removed.
+Cascade mode also uses `Backspace` to remove the last finished utterance.
+
+The surface keeps auto-send state visible in both provider modes. In cascade mode, a pause in speech finishes an utterance without sending it unless auto-send is on, and finished utterances build one draft until they are sent or removed. In Quicksilver mode, a native delegation sends automatically when auto-send is on. With manual send enabled, its recognized request stays visible until `Enter` sends it to Pi.
 
 Speaking while Pi is talking is a barge-in. Kassette stops current and queued audio immediately, then the finished utterance steers the running Pi turn. Speech that finishes while Pi is busy without a detected barge-in stays as a draft.
 
