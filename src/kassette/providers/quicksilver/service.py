@@ -13,6 +13,7 @@ from pipecat.frames.frames import (
     InputAudioRawFrame,
     InterruptionFrame,
     OutputAudioRawFrame,
+    OutputTransportMessageUrgentFrame,
     StartFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
@@ -45,11 +46,11 @@ this first delivery, so answer with your own knowledge and never request client
 delegation.
 """
 
-DELEGATED_VOICE_INSTRUCTIONS = """You are kassette, the live voice interface for Pi.
+DELEGATED_VOICE_INSTRUCTIONS = """You are kassette, the live voice interface for the client's agent.
 
 Delegate every user request to the client. Remain silent and don't acknowledge
-the request before client context arrives. Once the client returns Pi's answer,
-present it naturally and faithfully in concise spoken form.
+the request before client context arrives. Once the client returns the agent's
+answer, present it naturally and faithfully in concise spoken form.
 Do not mention delegation, hidden context, or implementation details.
 """
 
@@ -90,6 +91,7 @@ class GPTLiveService(FrameProcessor):
         enable_direct_mode: bool = False,
         manage_session_lifecycle: bool = True,
         client_delegation: bool = False,
+        publish_client_events: bool = False,
     ) -> None:
         super().__init__(  # pyright: ignore[reportUnknownMemberType]
             name=name,
@@ -101,6 +103,8 @@ class GPTLiveService(FrameProcessor):
         self._event_sink = event_sink or _discard_event
         self._manage_session_lifecycle = manage_session_lifecycle
         self._client_delegation = client_delegation
+        self._publish_client_events = publish_client_events
+        self._client_event_sequence = 0
         self._pending_delegations: set[str] = set()
         self._transport = transport_factory(
             session_id=session_id,
@@ -118,6 +122,30 @@ class GPTLiveService(FrameProcessor):
         self._closed = False
         self._received_input = False
         self._speaking = False
+
+    async def _emit_event(self, event: SessionEvent) -> None:
+        await self._event_sink(event)
+        if not self._publish_client_events:
+            return
+        data: dict[str, object] = dict(event.metadata)
+        data["session_id"] = event.session_id
+        if event.state is not None:
+            data["state"] = event.state.value
+        if event.role is not None:
+            data["role"] = event.role.value
+        if event.text is not None:
+            data["text"] = event.text
+        if event.provider_type is not None:
+            data["provider_type"] = event.provider_type
+        if event.error_code is not None:
+            data["error_code"] = event.error_code
+        self._client_event_sequence += 1
+        data["sequence"] = self._client_event_sequence
+        await self.push_frame(
+            OutputTransportMessageUrgentFrame(
+                message={"label": "kassette", "type": event.type.value, "data": data}
+            )
+        )
 
     async def handle_client_message(self, message: Any) -> bool:
         if not self._client_delegation or not isinstance(message, dict):
@@ -157,7 +185,7 @@ class GPTLiveService(FrameProcessor):
                 return
             if not self._received_input:
                 self._received_input = True
-                await self._event_sink(
+                await self._emit_event(
                     SessionEvent(
                         session_id=self._session_id,
                         type=SessionEventType.INPUT_AUDIO_STARTED,
@@ -212,7 +240,7 @@ class GPTLiveService(FrameProcessor):
                     await self._transition(SessionState.LISTENING)
                 raise
             try:
-                await self._event_sink(
+                await self._emit_event(
                     SessionEvent(
                         session_id=self._session_id,
                         type=SessionEventType.INTERRUPTED,
@@ -264,7 +292,7 @@ class GPTLiveService(FrameProcessor):
         if not self._speaking:
             self._speaking = True
             await self._transition(SessionState.SPEAKING)
-            await self._event_sink(
+            await self._emit_event(
                 SessionEvent(
                     session_id=self._session_id,
                     type=SessionEventType.SPEECH_STARTED,
@@ -286,7 +314,7 @@ class GPTLiveService(FrameProcessor):
             await self._transition(SessionState.LISTENING, provider_session_id=event.session_id)
             return
         if event.type in {"input_transcript.added", "output_transcript.added"}:
-            await self._event_sink(
+            await self._emit_event(
                 SessionEvent(
                     session_id=self._session_id,
                     type=SessionEventType.TRANSCRIPT_DELTA,
@@ -299,14 +327,14 @@ class GPTLiveService(FrameProcessor):
             if event.role == "assistant" and self._speaking:
                 self._speaking = False
                 await self._transition(SessionState.LISTENING)
-                await self._event_sink(
+                await self._emit_event(
                     SessionEvent(
                         session_id=self._session_id,
                         type=SessionEventType.SPEECH_STOPPED,
                         state=SessionState.LISTENING,
                     )
                 )
-            await self._event_sink(
+            await self._emit_event(
                 SessionEvent(
                     session_id=self._session_id,
                     type=SessionEventType.TRANSCRIPT_FINAL,
@@ -318,7 +346,7 @@ class GPTLiveService(FrameProcessor):
         if event.type == "delegation.created" and event.delegation_id:
             if self._client_delegation:
                 self._pending_delegations.add(event.delegation_id)
-                await self._event_sink(
+                await self._emit_event(
                     SessionEvent(
                         session_id=self._session_id,
                         type=SessionEventType.DELEGATION_REQUESTED,
@@ -328,7 +356,7 @@ class GPTLiveService(FrameProcessor):
                 )
             else:
                 await self._transport.send(build_delegation_unavailable(event.delegation_id))
-                await self._event_sink(
+                await self._emit_event(
                     SessionEvent(
                         session_id=self._session_id,
                         type=SessionEventType.DELEGATION_UNAVAILABLE,
@@ -336,7 +364,7 @@ class GPTLiveService(FrameProcessor):
                 )
             return
         if event.type == "unknown":
-            await self._event_sink(
+            await self._emit_event(
                 SessionEvent(
                     session_id=self._session_id,
                     type=SessionEventType.PROVIDER_UNKNOWN,
@@ -362,7 +390,7 @@ class GPTLiveService(FrameProcessor):
                 expected_generation=self._generation,
             )
             resolved_state = snapshot.state
-        await self._event_sink(
+        await self._emit_event(
             SessionEvent(
                 session_id=self._session_id,
                 type=SessionEventType.SESSION_STATE_CHANGED,
@@ -388,7 +416,7 @@ class GPTLiveService(FrameProcessor):
     async def _fail_session(self, error_code: str, *, message: str) -> None:
         if not self._manage_session_lifecycle:
             try:
-                await self._event_sink(
+                await self._emit_event(
                     SessionEvent(
                         session_id=self._session_id,
                         type=SessionEventType.ERROR,
@@ -423,14 +451,14 @@ class GPTLiveService(FrameProcessor):
                 and snapshot is not None
                 and previous.state is not snapshot.state
             ):
-                await self._event_sink(
+                await self._emit_event(
                     SessionEvent(
                         session_id=self._session_id,
                         type=SessionEventType.SESSION_STATE_CHANGED,
                         state=snapshot.state,
                     )
                 )
-            await self._event_sink(
+            await self._emit_event(
                 SessionEvent(
                     session_id=self._session_id,
                     type=SessionEventType.ERROR,

@@ -407,6 +407,8 @@ async def run_switchable_session(
         session_registry=registry,
         credential_provider=credential_provider,
         quicksilver_transport_factory=provider_transport_factory,
+        quicksilver_client_delegation=True,
+        quicksilver_publish_client_events=True,
     )
     runtime = VoiceProviderRuntime(
         session_id=session_id,

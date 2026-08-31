@@ -3,7 +3,12 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 import pytest
-from pipecat.frames.frames import Frame, InputAudioRawFrame, OutputAudioRawFrame
+from pipecat.frames.frames import (
+    Frame,
+    InputAudioRawFrame,
+    OutputAudioRawFrame,
+    OutputTransportMessageUrgentFrame,
+)
 from pipecat.processors.frame_processor import FrameDirection
 
 from kassette.credentials import CodexCredentials
@@ -121,13 +126,14 @@ async def test_client_delegation_round_trip_uses_matching_pi_response() -> None:
     async def collect(event: SessionEvent) -> None:
         events.append(event)
 
-    service = GPTLiveService(
+    service = RecordingGPTLiveService(
         session_id="voice-1",
         registry=registry,
         credentials=FakeCredentials(),
         event_sink=collect,
         transport_factory=create_transport,
         client_delegation=True,
+        publish_client_events=True,
     )
     await service._start_session()  # pyright: ignore[reportPrivateUsage]
 
@@ -142,6 +148,21 @@ async def test_client_delegation_round_trip_uses_matching_pi_response() -> None:
     assert events[-1].type is SessionEventType.DELEGATION_REQUESTED
     assert events[-1].text == "inspect the repository"
     assert events[-1].metadata == {"delegation_id": "delegation-1"}
+    client_messages = [
+        frame.message
+        for frame, _direction in service.pushed_frames
+        if isinstance(frame, OutputTransportMessageUrgentFrame)
+    ]
+    assert client_messages[-1] == {
+        "label": "kassette",
+        "type": "delegation.requested",
+        "data": {
+            "session_id": "voice-1",
+            "delegation_id": "delegation-1",
+            "text": "inspect the repository",
+            "sequence": 3,
+        },
+    }
     assert transports[0].sent_messages == []
     assert await service.handle_client_message(
         {"label": "kassette", "type": "input.pause", "data": {}}

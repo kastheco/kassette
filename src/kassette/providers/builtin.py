@@ -162,6 +162,7 @@ def build_builtin_provider_registry(
     credential_provider: CodexCredentialProvider | None = None,
     quicksilver_transport_factory: TransportFactory = QuicksilverTransport,
     quicksilver_client_delegation: bool = False,
+    quicksilver_publish_client_events: bool = False,
 ) -> VoiceProviderRegistry:
     """Build the two real provider adapters behind one runtime registry."""
     transcription_key_available = (
@@ -259,6 +260,7 @@ def build_builtin_provider_registry(
             transport_factory=quicksilver_transport_factory,
             manage_session_lifecycle=False,
             client_delegation=quicksilver_client_delegation,
+            publish_client_events=quicksilver_publish_client_events,
         )
         return PipelineProviderAdapter(
             [service],

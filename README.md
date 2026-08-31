@@ -13,7 +13,7 @@
 
 kassette is a local realtime voice service built on pipecat. it owns the live audio path and short-lived voice sessions while products and agent runtimes keep their own conversations.
 
-the default path is a cascade. gemini 3.5 transcribe live produces provisional and final transcripts, then fish audio speaks the response returned by the active client. the cascade can use openai's low-latency `gpt-live-transcribe` model instead. clickclack sends final turns through its normal openclaw message path. pi keeps its own conversation and reasoning. quicksilver gpt-live is the second runtime-selectable adapter: browser sessions use direct mode, while pi terminal sessions delegate each request to pi and return pi's answer for native speech.
+the default path is a cascade. gemini 3.5 transcribe live produces provisional and final transcripts, then fish audio speaks the response returned by the active client. the cascade can use openai's low-latency `gpt-live-transcribe` model instead. quicksilver gpt-live is the second runtime-selectable adapter. clickclack delegates each spoken request through its active openclaw conversation, while pi delegates through its current terminal session. both return the agent's answer to quicksilver for native speech.
 
 ## project status
 
@@ -109,7 +109,7 @@ implemented:
 - optional deterministic transcript grooming through external profiles
 - fish audio streaming tts for agent responses
 - local on-demand wav generation for message playback through `POST /api/tts`
-- gpt-live behind the isolated quicksilver adapter, including delegated pi terminal turns
+- gpt-live behind the isolated quicksilver adapter, including delegated clickclack/openclaw and pi terminal turns
 - generation-fenced runtime switching between cascade and quicksilver without webrtc renegotiation
 - provider discovery, readiness timeouts, rollback, sanitized diagnostics, interruption, and clean shutdown
 - automated reconnect, lifecycle, provider switching, transcript, tts, and failure-path coverage
