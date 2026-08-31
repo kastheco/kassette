@@ -219,10 +219,7 @@ class GPTLiveService(FrameProcessor):
         if synthetic is not None:
             synthetic.answer = answer
             synthetic.provider_resolved = True
-            if (
-                self._unauthorized_output_active
-                and self._active_response_delegation_id is None
-            ):
+            if self._unauthorized_output_active and self._active_response_delegation_id is None:
                 await self._transport.interrupt()
                 self._unauthorized_output_active = False
             await self._flush_synthetic_response()

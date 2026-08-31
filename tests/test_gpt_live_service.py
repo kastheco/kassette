@@ -272,9 +272,7 @@ async def test_synthetic_completion_authorizes_immediate_provider_audio() -> Non
         ProviderEvent(type="input_transcript.added", role="user", text="speak now")
     )
     await transport.event_sink(ProviderEvent(type="turn.done", role="user", text="speak now"))
-    request = next(
-        event for event in events if event.type is SessionEventType.DELEGATION_REQUESTED
-    )
+    request = next(event for event in events if event.type is SessionEventType.DELEGATION_REQUESTED)
     delegation_id = request.metadata["delegation_id"]
     assert isinstance(delegation_id, str)
 
