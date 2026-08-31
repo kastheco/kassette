@@ -1,10 +1,20 @@
-# kassette
+<table>
+  <tr>
+    <td width="260" align="center">
+      <img src="docs/assets/kassette.png" alt="Kassette tape over ocean waves and Mount Fuji" width="220">
+    </td>
+    <td>
+      <h1>Kassette</h1>
+      <p><strong>Local realtime voice for Pi, ClickClack, and OpenClaw.</strong></p>
+    </td>
+  </tr>
+</table>
 
 [![CI](https://github.com/kastheco/kassette/actions/workflows/ci.yml/badge.svg)](https://github.com/kastheco/kassette/actions/workflows/ci.yml)
 
-kassette is a local realtime voice service built on Pipecat. It owns transient voice sessions and the audio path. Products and agent runtimes keep their own durable conversations.
+Kassette is a local realtime voice service built on Pipecat. It owns transient voice sessions and the audio path while products and agent runtimes keep their durable conversations.
 
-The default pipeline is cascaded: Gemini 3.5 Transcribe Live produces provisional and finalized owner transcripts, ClickClack commits finalized turns to its normal message API for OpenClaw, and Fish Audio streams agent responses back through the existing SmallWebRTC connection. Cascade mode can instead use OpenAI's low-latency `gpt-live-transcribe` model for streaming transcripts. Quicksilver GPT-Live is a second runtime-selectable adapter behind the same session and transport.
+The default pipeline is cascaded: Gemini 3.5 Transcribe Live produces provisional and finalized owner transcripts for the active voice client, and Fish Audio streams returned response text through the existing session transport. Cascade mode can instead use OpenAI's low-latency `gpt-live-transcribe` model. ClickClack commits finalized turns to its normal OpenClaw message path, while Pi keeps its own conversation and reasoning. Quicksilver GPT-Live is the second runtime-selectable adapter: browser sessions use its direct mode, while Pi terminal sessions delegate each request to Pi and return Pi's answer for native speech.
 
 ## Project status
 
@@ -115,4 +125,4 @@ Intentionally outside kassette's scope:
 - cross-device session handoff
 - custom-voice enrollment and administration
 
-The original architecture document remains useful for design context, but its phased roadmap is historical: [Unified Realtime Voice Gateway](https://app.notion.com/p/3c9b3a0a9c19811494c7cabc976a27ee?pvs=204).
+The original architecture document remains useful for design context, but its phased roadmap is historical: [original voice gateway proposal](https://app.notion.com/p/3c7b3a0a9c1980b1a4c8c859b5322778).
