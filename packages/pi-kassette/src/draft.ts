@@ -1,3 +1,21 @@
+export function mergeTranscriptDelta(current: string, update: string): string {
+  const existing = current.trim();
+  const incoming = update.trim();
+  if (!existing) return incoming;
+  if (!incoming || existing.endsWith(incoming)) return existing;
+  if (incoming.startsWith(existing)) return incoming;
+
+  const overlapLimit = Math.min(existing.length, incoming.length);
+  for (let overlap = overlapLimit; overlap > 1; overlap--) {
+    if (existing.endsWith(incoming.slice(0, overlap))) {
+      return `${existing}${incoming.slice(overlap)}`;
+    }
+  }
+
+  const joinsWithoutSpace = /^[,.;:!?%)\]}’']/u.test(incoming) || /[(\[{]$/u.test(existing);
+  return `${existing}${joinsWithoutSpace ? "" : " "}${incoming}`;
+}
+
 export type TranscriptUpdate = {
   turnId: string;
   text: string;

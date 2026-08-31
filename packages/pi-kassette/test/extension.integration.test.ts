@@ -271,6 +271,10 @@ describe.sequential("pi-kassette extension delivery", () => {
 
     app.press("\u001b[32;2u");
     app.press("\u001b[32;2u");
+    app.emit("transcript.delta", { role: "user", text: "wait" });
+    app.emit("transcript.delta", { role: "user", text: "for" });
+    app.emit("transcript.delta", { role: "user", text: "enter" });
+    expect(app.render().join("\n")).toContain("wait for enter");
     app.emit("speech.started", {});
     app.emit("delegation.requested", {
       delegation_id: "delegation-manual",

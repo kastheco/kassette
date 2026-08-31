@@ -2,7 +2,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import type { KeyId } from "@earendil-works/pi-tui";
 import { deliverVoiceTranscript, interruptForBargeIn, transcriptDelivery } from "./bridge.js";
 import { KassetteClient, type ClientOptions } from "./client.js";
-import { TranscriptDraft } from "./draft.js";
+import { mergeTranscriptDelta, TranscriptDraft } from "./draft.js";
 import { mergeEditorDraft, resetVoiceBuffers } from "./lifecycle.js";
 import { SpeechChunker } from "./speech.js";
 import { initialVoiceState, reduceVoiceState, type ProviderMode, type VoiceAction, type VoiceState } from "./state.js";
@@ -35,6 +35,7 @@ export function createPiKassette(
   let providerMode: ProviderMode = "cascaded";
   let pendingDelegationId: string | undefined;
   let pendingDelegationText: string | undefined;
+  let nativeTranscript = "";
   let lastAutoSendToggleAt = 0;
   let surface: VoiceSurface | undefined;
   let editorBeforeVoice = "";
@@ -113,12 +114,14 @@ export function createPiKassette(
       ) {
         pendingDelegationId = delegationId;
         pendingDelegationText = text.trim();
+        nativeTranscript = pendingDelegationText;
         responseCaption = "";
         speech.clear();
         dispatch({ type: "transcript", text: pendingDelegationText, final: true });
         if (state.autoSend) submitNativeDelegation();
       }
     } else if (message.type === "input.audio_started") {
+      nativeTranscript = "";
       if (outputPending || state.status === "speaking") client?.send("output.cancel");
       if (ctx && !ctx.isIdle()) {
         suppressCurrentResponse = true;
@@ -137,8 +140,10 @@ export function createPiKassette(
       const text = data.text;
       if (providerMode === "native" && typeof text === "string") {
         const final = message.type === "transcript.final";
-        if (data.role === "user") dispatch({ type: "transcript", text, final });
-        else if (data.role === "assistant") responseCaption = text;
+        if (data.role === "user") {
+          nativeTranscript = final ? text.trim() : mergeTranscriptDelta(nativeTranscript, text);
+          dispatch({ type: "transcript", text: nativeTranscript, final });
+        } else if (data.role === "assistant") responseCaption = text;
         return;
       }
       const turnId = data.turn_id;
@@ -164,6 +169,7 @@ export function createPiKassette(
       outputPending = false;
       pendingDelegationId = undefined;
       pendingDelegationText = undefined;
+      nativeTranscript = "";
       suppressCurrentResponse = true;
       bargedIn = interruptForBargeIn(
         () => ctx?.abort(),
@@ -196,6 +202,7 @@ export function createPiKassette(
     providerMode = "cascaded";
     pendingDelegationId = undefined;
     pendingDelegationText = undefined;
+    nativeTranscript = "";
     lastAutoSendToggleAt = 0;
     inputPaused = false;
     desiredInputPaused = true;

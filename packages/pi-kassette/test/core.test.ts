@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { deliverVoiceTranscript, interruptForBargeIn, transcriptDelivery } from "../src/bridge.js";
 import { OwnedService } from "../src/client.js";
-import { TranscriptDraft } from "../src/draft.js";
+import { mergeTranscriptDelta, TranscriptDraft } from "../src/draft.js";
 import { mergeEditorDraft, resetVoiceBuffers } from "../src/lifecycle.js";
 import { parseServerMessage, REQUIRED_CAPABILITIES } from "../src/protocol.js";
 import { SpeechChunker, prepareTextForSpeech } from "../src/speech.js";
@@ -43,6 +43,13 @@ describe("terminal protocol", () => {
 });
 
 describe("transcript draft", () => {
+  it("merges native word deltas while accepting cumulative revisions", () => {
+    expect(mergeTranscriptDelta("", "wait")).toBe("wait");
+    expect(mergeTranscriptDelta("wait", "for")).toBe("wait for");
+    expect(mergeTranscriptDelta("wait for", "wait for enter")).toBe("wait for enter");
+    expect(mergeTranscriptDelta("wait for enter", ".")).toBe("wait for enter.");
+  });
+
   it("orders turns, ignores stale updates, and undoes one finalized utterance", () => {
     const draft = new TranscriptDraft();
     draft.update({ turnId: "a", text: "hello", sequence: 2, final: true });
