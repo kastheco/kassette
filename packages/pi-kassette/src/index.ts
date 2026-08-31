@@ -30,6 +30,8 @@ export function createPiKassette(
   let desiredInputPaused = true;
   let bargedIn = false;
   let responseCaption = "";
+  let suppressCurrentResponse = false;
+  let outputPending = false;
   let surface: VoiceSurface | undefined;
   let editorBeforeVoice = "";
   const draft = new TranscriptDraft();
@@ -53,6 +55,7 @@ export function createPiKassette(
       () => {
         speech.clear();
         responseCaption = "";
+        outputPending = false;
       },
     );
     bargedIn = false;
@@ -64,6 +67,15 @@ export function createPiKassette(
       dispatch({ type: "connected" });
       client?.send(desiredInputPaused ? "input.pause" : "input.resume");
       if (state.outputMuted) client?.send("output.mute", { muted: true });
+    } else if (message.type === "input.audio_started") {
+      if (outputPending || state.status === "speaking") client?.send("output.cancel");
+      if (ctx && !ctx.isIdle()) {
+        suppressCurrentResponse = true;
+        ctx.abort();
+      }
+      outputPending = false;
+      speech.clear();
+      responseCaption = "";
     } else if (message.type === "audio.level") {
       const direction = data.direction;
       const level = data.level;
@@ -81,8 +93,10 @@ export function createPiKassette(
         if (final && state.autoSend) submit();
       }
     } else if (message.type === "speech.started") {
+      outputPending = false;
       dispatch({ type: "speaking", text: responseCaption });
     } else if (message.type === "speech.stopped") {
+      outputPending = false;
       dispatch({ type: "listening" });
     } else if (message.type === "session.state_changed") {
       if (data.state === "listening") dispatch({ type: "listening" });
@@ -90,6 +104,7 @@ export function createPiKassette(
       else if (data.state === "interrupting") dispatch({ type: "interrupted" });
       else if (data.state === "failed") dispatch({ type: "failed", error: "Kassette failed" });
     } else if (message.type === "session.interrupted") {
+      outputPending = false;
       bargedIn = interruptForBargeIn(
         () => ctx?.abort(),
         () => speech.clear(),
@@ -116,6 +131,8 @@ export function createPiKassette(
     ctx.ui.setEditorText(mergeEditorDraft(editorBeforeVoice, text));
     responseCaption = resetVoiceBuffers(draft, speech);
     bargedIn = false;
+    suppressCurrentResponse = false;
+    outputPending = false;
     inputPaused = false;
     desiredInputPaused = true;
     editorBeforeVoice = "";
@@ -136,6 +153,7 @@ export function createPiKassette(
       toggleInput: () => {
         if (state.status === "speaking") {
           client?.send("output.cancel");
+          outputPending = false;
           desiredInputPaused = false;
           client?.send("input.resume");
           dispatch({ type: "input-resumed" });
@@ -156,6 +174,8 @@ export function createPiKassette(
       },
       interrupt: () => {
         client?.send("output.cancel");
+        suppressCurrentResponse = true;
+        outputPending = false;
         ctx?.abort();
         speech.clear();
         responseCaption = "";
@@ -189,18 +209,30 @@ export function createPiKassette(
   pi.on("session_before_switch", async () => { await exit(); });
   pi.on("session_before_fork", async () => { await exit(); });
   pi.on("session_shutdown", async () => { await exit(); ctx = undefined; });
-  pi.on("agent_start", () => { if (active) dispatch({ type: "thinking" }); });
+  pi.on("agent_start", () => {
+    if (!active) return;
+    suppressCurrentResponse = false;
+    outputPending = false;
+    responseCaption = "";
+    speech.clear();
+    dispatch({ type: "thinking" });
+  });
   pi.on("message_update", (event) => {
-    if (!active || event.assistantMessageEvent.type !== "text_delta") return;
+    if (!active || suppressCurrentResponse || event.assistantMessageEvent.type !== "text_delta") return;
     const delta = event.assistantMessageEvent.delta;
     responseCaption += delta;
-    dispatch({ type: "speaking", text: responseCaption });
-    for (const chunk of speech.push(delta)) client?.send("tts.speak", { text: chunk });
+    speech.push(delta);
   });
   pi.on("message_end", () => {
     if (!active) return;
-    for (const chunk of speech.finish()) client?.send("tts.speak", { text: chunk });
+    if (suppressCurrentResponse) {
+      speech.clear();
+    } else {
+      const [reply] = speech.finish();
+      if (reply) outputPending = client?.send("tts.speak", { text: reply }) === true;
+    }
     responseCaption = "";
+    suppressCurrentResponse = false;
   });
 }
 

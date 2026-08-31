@@ -152,6 +152,7 @@ def session_event_envelope(event: SessionEvent) -> dict[str, object] | None:
     """Map runtime events needed by terminal clients onto the shared envelope."""
     if event.type not in {
         SessionEventType.SESSION_STATE_CHANGED,
+        SessionEventType.INPUT_AUDIO_STARTED,
         SessionEventType.SPEECH_STARTED,
         SessionEventType.SPEECH_STOPPED,
         SessionEventType.INTERRUPTED,

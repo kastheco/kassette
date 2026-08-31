@@ -113,11 +113,19 @@ class CascadedVoiceEvents(FrameProcessor):
 
         if isinstance(frame, StartFrame) and self._publish_start_state:
             await self.publish_state(SessionState.LISTENING)
+        elif isinstance(frame, VADUserStartedSpeakingFrame) and self._publish_transcripts:
+            await self._event_sink(
+                SessionEvent(
+                    session_id=self._session_id,
+                    type=SessionEventType.INPUT_AUDIO_STARTED,
+                    state=SessionState.LISTENING,
+                )
+            )
         elif isinstance(frame, InterimTranscriptionFrame) and self._publish_transcripts:
             await self._publish_transcript(frame.text, final=False)
         elif isinstance(frame, TranscriptionFrame) and self._publish_transcripts:
             await self._publish_transcript(frame.text, final=True)
-        elif isinstance(frame, TTSStartedFrame) and self._publish_speech:
+        elif isinstance(frame, BotStartedSpeakingFrame) and self._publish_speech:
             await self.publish_state(SessionState.SPEAKING)
             await self._event_sink(
                 SessionEvent(
@@ -126,7 +134,7 @@ class CascadedVoiceEvents(FrameProcessor):
                     state=SessionState.SPEAKING,
                 )
             )
-        elif isinstance(frame, TTSStoppedFrame) and self._publish_speech:
+        elif isinstance(frame, BotStoppedSpeakingFrame) and self._publish_speech:
             await self.publish_state(SessionState.LISTENING)
             await self._event_sink(
                 SessionEvent(

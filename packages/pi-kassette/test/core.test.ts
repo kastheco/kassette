@@ -101,26 +101,27 @@ describe("Pi turn delivery", () => {
 });
 
 describe("response speech", () => {
-  it("streams completed sentences and leaves code visual", () => {
+  it("buffers a complete reply into one speech request and leaves code visual", () => {
     const chunker = new SpeechChunker();
-    expect(chunker.push("First sentence. Partial")).toEqual(["First sentence."]);
-    expect(chunker.push(" answer!")).toEqual(["Partial answer!"]);
-    expect(chunker.finish()).toEqual([]);
+    expect(chunker.push("First sentence. Partial")).toEqual([]);
+    expect(chunker.push(" answer!")).toEqual([]);
+    expect(chunker.finish()).toEqual(["First sentence. Partial answer!"]);
     expect(prepareTextForSpeech("Look:\n```ts\nconst x = 1\n```\n[docs](https://x.test)")).toBe(
       "Look. I put the code example in the chat instead of reading it aloud. docs",
     );
   });
 
-  it("never emits punctuation from a streaming fenced code block and clears interrupted tails", () => {
+  it("never speaks streaming fenced code and clears interrupted replies", () => {
     const chunker = new SpeechChunker();
-    expect(chunker.push("Before. ```ts\nconst x = why?\n")).toEqual(["Before."]);
-    expect(chunker.push("done!\n``` After.")).toEqual([
-      "I put the code example in the chat instead of reading it aloud.",
-      "After.",
+    expect(chunker.push("Before. ```ts\nconst x = why?\n")).toEqual([]);
+    expect(chunker.push("done!\n``` After.")).toEqual([]);
+    expect(chunker.finish()).toEqual([
+      "Before. I put the code example in the chat instead of reading it aloud. After.",
     ]);
+    chunker.push("Interrupted answer.");
     chunker.clear();
-    expect(chunker.push("New answer.")).toEqual(["New answer."]);
-    expect(chunker.finish()).toEqual([]);
+    expect(chunker.push("New answer.")).toEqual([]);
+    expect(chunker.finish()).toEqual(["New answer."]);
   });
 });
 

@@ -45,6 +45,7 @@ async def test_desired_pause_is_retried_after_adapter_ready_and_only_then_acks_t
 @pytest.mark.parametrize(
     ("event_type", "expected_type"),
     [
+        (SessionEventType.INPUT_AUDIO_STARTED, "input.audio_started"),
         (SessionEventType.SPEECH_STARTED, "speech.started"),
         (SessionEventType.INTERRUPTED, "session.interrupted"),
     ],

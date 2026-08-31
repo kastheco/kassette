@@ -4,6 +4,7 @@ from typing import Any
 import pytest
 from pipecat.frames.frames import (
     BotStartedSpeakingFrame,
+    BotStoppedSpeakingFrame,
     Frame,
     InterimTranscriptionFrame,
     InterruptionFrame,
@@ -64,6 +65,28 @@ def _messages(processor: RecordingCascadedVoiceEvents) -> list[dict[str, Any]]:
         frame.message
         for frame, _direction in processor.pushed_frames
         if isinstance(frame, OutputTransportMessageUrgentFrame)
+    ]
+
+
+async def test_vad_user_start_is_published_before_transcript_text() -> None:
+    events: list[SessionEvent] = []
+
+    async def collect(event: SessionEvent) -> None:
+        events.append(event)
+
+    processor = RecordingCascadedVoiceEvents(session_id="voice-1", event_sink=collect)
+    await processor.process_frame(
+        VADUserStartedSpeakingFrame(),
+        FrameDirection.DOWNSTREAM,
+    )
+    await processor.process_frame(
+        InterimTranscriptionFrame("continuing", "owner", "now"),
+        FrameDirection.DOWNSTREAM,
+    )
+
+    assert [event.type for event in events] == [
+        SessionEventType.INPUT_AUDIO_STARTED,
+        SessionEventType.TRANSCRIPT_DELTA,
     ]
 
 
@@ -131,11 +154,15 @@ async def test_pausing_input_closes_the_active_transcript_segment() -> None:
     assert turn_ids == ["voice-1:1", "voice-1:2"]
 
 
-async def test_tts_frames_publish_speaking_and_listening_states() -> None:
+async def test_only_actual_playback_publishes_speaking_and_listening_states() -> None:
     processor = RecordingCascadedVoiceEvents(session_id="voice-1")
 
     await processor.process_frame(TTSStartedFrame(), FrameDirection.DOWNSTREAM)
     await processor.process_frame(TTSStoppedFrame(), FrameDirection.DOWNSTREAM)
+    assert _messages(processor) == []
+
+    await processor.process_frame(BotStartedSpeakingFrame(), FrameDirection.UPSTREAM)
+    await processor.process_frame(BotStoppedSpeakingFrame(), FrameDirection.UPSTREAM)
 
     messages = _messages(processor)
     assert [message["data"]["state"] for message in messages] == [
@@ -232,7 +259,7 @@ async def test_transcript_and_speech_events_can_run_on_opposite_sides_of_tts() -
     await transcript_events.process_frame(transcript, FrameDirection.DOWNSTREAM)
     await transcript_events.process_frame(TTSStartedFrame(), FrameDirection.DOWNSTREAM)
     await speech_events.process_frame(transcript, FrameDirection.DOWNSTREAM)
-    await speech_events.process_frame(TTSStartedFrame(), FrameDirection.DOWNSTREAM)
+    await speech_events.process_frame(BotStartedSpeakingFrame(), FrameDirection.UPSTREAM)
 
     assert [message["type"] for message in _messages(transcript_events)] == ["transcript.delta"]
     assert [message["type"] for message in _messages(speech_events)] == ["session.state_changed"]

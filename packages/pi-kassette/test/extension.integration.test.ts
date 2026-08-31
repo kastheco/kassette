@@ -31,9 +31,11 @@ class FakeVoiceClient implements VoiceClient {
 function harness(idle = true): {
   command: () => Promise<void>;
   emit: (type: string, data: Record<string, unknown>) => void;
+  emitPi: (type: string, event?: unknown) => Promise<void>;
   press: (data: string) => void;
   sentMessages: Array<[string, { deliverAs?: "steer" | "followUp" } | undefined]>;
   getClientCommands: () => Array<[string, Record<string, unknown>]>;
+  getAbortCount: () => number;
   setIdle: (value: boolean) => void;
   getEditorText: () => string;
   shutdown: () => Promise<void>;
@@ -45,6 +47,7 @@ function harness(idle = true): {
   let client: FakeVoiceClient | undefined;
   let editorText = "";
   let currentlyIdle = idle;
+  let abortCount = 0;
   const sentMessages: Array<[string, { deliverAs?: "steer" | "followUp" } | undefined]> = [];
 
   const pi = {
@@ -68,7 +71,7 @@ function harness(idle = true): {
     hasUI: true,
     mode: "tui",
     isIdle: () => currentlyIdle,
-    abort: () => undefined,
+    abort: () => { abortCount += 1; currentlyIdle = true; },
     ui: {
       theme: colorTheme,
       notify: () => undefined,
@@ -108,9 +111,13 @@ function harness(idle = true): {
       if (!client) throw new Error("voice client was not created");
       client.emit(type, data);
     },
+    emitPi: async (type, event = {}) => {
+      for (const handler of handlers.get(type) ?? []) await handler(event, context);
+    },
     press: (data) => ensureSurface().handleInput(data),
     sentMessages,
     getClientCommands: () => client?.sent ?? [],
+    getAbortCount: () => abortCount,
     setIdle: (value) => { currentlyIdle = value; },
     getEditorText: () => editorText,
     shutdown: async () => {
@@ -165,6 +172,65 @@ describe.sequential("pi-kassette extension delivery", () => {
       ["output.cancel", {}],
       ["input.resume", {}],
     ]);
+    await app.shutdown();
+  });
+
+  it("sends one TTS request only after the complete assistant reply", async () => {
+    const app = harness(false);
+    await app.command();
+
+    await app.emitPi("agent_start");
+    await app.emitPi("message_update", {
+      assistantMessageEvent: { type: "text_delta", delta: "Got it. " },
+    });
+    await app.emitPi("message_update", {
+      assistantMessageEvent: { type: "text_delta", delta: "Here is the rest." },
+    });
+
+    expect(app.getClientCommands()).toEqual([]);
+    await app.emitPi("message_end");
+    expect(app.getClientCommands()).toEqual([
+      ["tts.speak", { text: "Got it. Here is the rest." }],
+    ]);
+    await app.shutdown();
+  });
+
+  it("aborts and suppresses a reply when the user resumes speaking", async () => {
+    const app = harness(false);
+    await app.command();
+
+    await app.emitPi("agent_start");
+    await app.emitPi("message_update", {
+      assistantMessageEvent: { type: "text_delta", delta: "Fast acknowledgement." },
+    });
+    app.emit("input.audio_started", {});
+    await app.emitPi("message_update", {
+      assistantMessageEvent: { type: "text_delta", delta: " Late response text." },
+    });
+    await app.emitPi("message_end");
+
+    expect(app.getAbortCount()).toBe(1);
+    expect(app.getClientCommands()).toEqual([]);
+    await app.shutdown();
+  });
+
+  it("cancels a completed reply that is queued when user speech resumes", async () => {
+    const app = harness(false);
+    await app.command();
+
+    await app.emitPi("agent_start");
+    await app.emitPi("message_update", {
+      assistantMessageEvent: { type: "text_delta", delta: "Queued reply." },
+    });
+    await app.emitPi("message_end");
+    app.setIdle(true);
+    app.emit("input.audio_started", {});
+
+    expect(app.getClientCommands()).toEqual([
+      ["tts.speak", { text: "Queued reply." }],
+      ["output.cancel", {}],
+    ]);
+    expect(app.getAbortCount()).toBe(0);
     await app.shutdown();
   });
 
