@@ -209,7 +209,14 @@ async def test_client_delegation_falls_back_before_direct_provider_answer() -> N
             "data": {"delegation_id": delegation_id, "text": "Agent response."},
         }
     )
-    assert transport.sent_messages == []
+    assert transport.sent_messages == [
+        {
+            "type": "session.context.append",
+            "channel": "speakable",
+            "content": [{"type": "input_text", "text": "Agent response."}],
+        }
+    ]
+    assert transport.interrupted
 
     await transport.audio_sink(AudioChunk(audio=b"\x64\x00", sample_rate=24_000, num_channels=1))
     assert not any(isinstance(frame, OutputAudioRawFrame) for frame, _ in service.pushed_frames)
@@ -273,7 +280,13 @@ async def test_completed_synthetic_delegation_absorbs_late_real_delegation() -> 
             "data": {"delegation_id": delegation_id, "text": "Agent response."},
         }
     )
-    assert transport.sent_messages == []
+    assert transport.sent_messages == [
+        {
+            "type": "session.context.append",
+            "channel": "speakable",
+            "content": [{"type": "input_text", "text": "Agent response."}],
+        }
+    ]
 
     await transport.event_sink(
         ProviderEvent(type="turn.done", role="assistant", text="direct provider answer")
@@ -524,7 +537,13 @@ async def test_late_real_delegation_matches_pending_turn_text_in_order() -> None
             }
         )
 
-    assert transport.sent_messages == []
+    assert transport.sent_messages == [
+        {
+            "type": "session.context.append",
+            "channel": "speakable",
+            "content": [{"type": "input_text", "text": "First answer."}],
+        }
+    ]
 
     await transport.event_sink(
         ProviderEvent(type="turn.done", role="assistant", text="direct first answer")

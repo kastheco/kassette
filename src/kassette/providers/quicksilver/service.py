@@ -218,6 +218,13 @@ class GPTLiveService(FrameProcessor):
         self._pending_delegations.remove(delegation_id)
         if synthetic is not None:
             synthetic.answer = answer
+            synthetic.provider_resolved = True
+            if (
+                self._unauthorized_output_active
+                and self._active_response_delegation_id is None
+            ):
+                await self._transport.interrupt()
+                self._unauthorized_output_active = False
             await self._flush_synthetic_response()
             return True
         await self._transport.send(build_delegation_response(delegation_id, answer))
@@ -424,6 +431,14 @@ class GPTLiveService(FrameProcessor):
                     if final_text and self._active_delegation_id is None:
                         await self._request_synthetic_delegation(turn_id, final_text)
                 self._finish_user_turn()
+                return
+            if (
+                event.role == "assistant"
+                and self._active_response_delegation_id is not None
+                and self._awaiting_client_output_start
+                and not self._client_output_authorized
+            ):
+                self._unauthorized_output_active = False
                 return
             if event.role == "assistant" and self._speaking:
                 self._speaking = False
