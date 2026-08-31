@@ -224,6 +224,38 @@ async def test_signaling_answer_is_size_bounded(monkeypatch: MonkeyPatch) -> Non
         await transport.open()
 
 
+async def test_ordered_provider_audio_is_dispatched_after_its_control_event() -> None:
+    received: list[tuple[str, object]] = []
+
+    async def collect_event(event: ProviderEvent) -> None:
+        received.append(("event", event.type))
+
+    async def collect_audio(chunk: AudioChunk) -> None:
+        received.append(("audio", chunk.audio))
+
+    transport = QuicksilverTransport(
+        session_id="voice-1",
+        credentials=FakeCredentials(),
+        instructions="instructions",
+        voice="sol",
+        event_sink=collect_event,
+        audio_sink=collect_audio,
+    )
+    await transport._dispatch_provider_event(  # pyright: ignore[reportPrivateUsage]
+        ProviderEvent(
+            type="output_audio.delta",
+            audio=b"\x01\x02",
+            sample_rate=24_000,
+            num_channels=1,
+        )
+    )
+
+    assert received == [
+        ("event", "output_audio.delta"),
+        ("audio", b"\x01\x02"),
+    ]
+
+
 async def test_input_audio_track_enforces_chunk_size_bound() -> None:
     track = _InputAudioTrack()
     accepted = AudioChunk(audio=b"\x00" * 65_536, sample_rate=16_000, num_channels=1)

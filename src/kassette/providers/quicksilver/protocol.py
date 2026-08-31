@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import re
 from dataclasses import dataclass
@@ -43,6 +45,7 @@ _MAX_PROVIDER_TEXT_CHARS = 32_000
 _MAX_PROVIDER_ID_CHARS = 256
 _MAX_PROVIDER_TYPE_CHARS = 128
 _MAX_PROVIDER_ERROR_CHARS = 2_048
+_MAX_PROVIDER_AUDIO_BYTES = 196_608
 _MAX_PROVIDER_COLLECTION_ITEMS = 64
 
 ProviderEventType = Literal[
@@ -67,6 +70,9 @@ class ProviderEvent:
     delegation_id: str | None = None
     wire_type: str | None = None
     message: str | None = None
+    audio: bytes | None = None
+    sample_rate: int | None = None
+    num_channels: int | None = None
 
 
 def build_session_payload(instructions: str, voice: LiveVoice) -> dict[str, Any]:
@@ -115,12 +121,20 @@ def build_session_close() -> dict[str, str]:
     return {"type": "session.close"}
 
 
-def build_delegation_response(delegation_id: str, text: str) -> dict[str, Any]:
-    return {
+def build_delegation_response(
+    delegation_id: str,
+    text: str,
+    *,
+    channel: str | None = None,
+) -> dict[str, Any]:
+    message: dict[str, Any] = {
         "type": "delegation.context.append",
         "delegation_item_id": delegation_id,
         "content": [{"type": "input_text", "text": text}],
     }
+    if channel is not None:
+        message["channel"] = channel
+    return message
 
 
 def build_delegation_unavailable(delegation_id: str) -> dict[str, Any]:
@@ -128,6 +142,15 @@ def build_delegation_unavailable(delegation_id: str) -> dict[str, Any]:
         delegation_id,
         "Delegation is unavailable in this voice client. Answer directly.",
     )
+
+
+def build_spoken_context(text: str) -> dict[str, Any]:
+    """Append client-owned speech when the provider skipped delegation."""
+    return {
+        "type": "session.context.append",
+        "channel": "speakable",
+        "content": [{"type": "input_text", "text": text}],
+    }
 
 
 def parse_provider_event(payload: str | bytes | dict[str, Any]) -> ProviderEvent | None:
@@ -241,7 +264,21 @@ def parse_provider_event(payload: str | bytes | dict[str, Any]) -> ProviderEvent
             ),
         )
     if event_type == "output_audio.delta":
-        return ProviderEvent(type="output_audio.delta")
+        encoded_audio = event.get("audio")
+        if not isinstance(encoded_audio, str):
+            return None
+        try:
+            audio = base64.b64decode(encoded_audio, validate=True)
+        except (binascii.Error, ValueError):
+            return None
+        if not audio or len(audio) > _MAX_PROVIDER_AUDIO_BYTES:
+            return None
+        return ProviderEvent(
+            type="output_audio.delta",
+            audio=audio,
+            sample_rate=24_000,
+            num_channels=1,
+        )
     return ProviderEvent(type="unknown", wire_type=event_type[:_MAX_PROVIDER_TYPE_CHARS])
 
 

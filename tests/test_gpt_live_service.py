@@ -146,6 +146,415 @@ async def test_silent_provider_audio_does_not_trap_session_in_speaking() -> None
     await service._close()  # pyright: ignore[reportPrivateUsage]
 
 
+async def test_client_delegation_falls_back_before_direct_provider_answer() -> None:
+    registry = SessionRegistry()
+    await registry.create("voice-1")
+    events: list[SessionEvent] = []
+    transports: list[FakeTransport] = []
+
+    def create_transport(**kwargs: Any) -> FakeTransport:
+        transport = FakeTransport(**kwargs)
+        transports.append(transport)
+        return transport
+
+    async def collect(event: SessionEvent) -> None:
+        events.append(event)
+
+    service = RecordingGPTLiveService(
+        session_id="voice-1",
+        registry=registry,
+        credentials=FakeCredentials(),
+        event_sink=collect,
+        transport_factory=create_transport,
+        client_delegation=True,
+        publish_client_events=True,
+    )
+    await service._start_session()  # pyright: ignore[reportPrivateUsage]
+    transport = transports[0]
+
+    for delta in ("very", " very", " mes", "sage"):
+        await transport.event_sink(
+            ProviderEvent(type="input_transcript.added", role="user", text=delta)
+        )
+    await transport.audio_sink(AudioChunk(audio=b"\x64\x00", sample_rate=24_000, num_channels=1))
+
+    assert not any(isinstance(frame, OutputAudioRawFrame) for frame, _ in service.pushed_frames)
+
+    await transport.event_sink(
+        ProviderEvent(type="turn.done", role="user", text="very very message")
+    )
+
+    user_transcripts = [
+        event for event in events if event.role is not None and event.role.value == "user"
+    ]
+    assert [event.text for event in user_transcripts] == [
+        "very",
+        "very very",
+        "very very mes",
+        "very very message",
+        "very very message",
+    ]
+    assert len({event.metadata.get("turn_id") for event in user_transcripts}) == 1
+    fallback = next(
+        event for event in events if event.type is SessionEventType.DELEGATION_REQUESTED
+    )
+    assert fallback.text == "very very message"
+    delegation_id = fallback.metadata["delegation_id"]
+    assert isinstance(delegation_id, str)
+
+    assert await service.handle_client_message(
+        {
+            "label": "kassette",
+            "type": "delegation.complete",
+            "data": {"delegation_id": delegation_id, "text": "Agent response."},
+        }
+    )
+    assert transport.sent_messages == []
+
+    await transport.audio_sink(AudioChunk(audio=b"\x64\x00", sample_rate=24_000, num_channels=1))
+    assert not any(isinstance(frame, OutputAudioRawFrame) for frame, _ in service.pushed_frames)
+
+    await transport.event_sink(
+        ProviderEvent(type="turn.done", role="assistant", text="direct provider answer")
+    )
+    assert transport.sent_messages == [
+        {
+            "type": "session.context.append",
+            "channel": "speakable",
+            "content": [{"type": "input_text", "text": "Agent response."}],
+        }
+    ]
+
+    await transport.audio_sink(AudioChunk(audio=b"\x64\x00", sample_rate=24_000, num_channels=1))
+    assert not any(isinstance(frame, OutputAudioRawFrame) for frame, _ in service.pushed_frames)
+
+    await transport.event_sink(ProviderEvent(type="output_audio.delta"))
+    await transport.audio_sink(AudioChunk(audio=b"\x64\x00", sample_rate=24_000, num_channels=1))
+    assert any(isinstance(frame, OutputAudioRawFrame) for frame, _ in service.pushed_frames)
+
+
+async def test_completed_synthetic_delegation_absorbs_late_real_delegation() -> None:
+    registry = SessionRegistry()
+    await registry.create("voice-1")
+    events: list[SessionEvent] = []
+    transports: list[FakeTransport] = []
+
+    def create_transport(**kwargs: Any) -> FakeTransport:
+        transport = FakeTransport(**kwargs)
+        transports.append(transport)
+        return transport
+
+    async def collect(event: SessionEvent) -> None:
+        events.append(event)
+
+    service = RecordingGPTLiveService(
+        session_id="voice-1",
+        registry=registry,
+        credentials=FakeCredentials(),
+        event_sink=collect,
+        transport_factory=create_transport,
+        client_delegation=True,
+    )
+    await service._start_session()  # pyright: ignore[reportPrivateUsage]
+    transport = transports[0]
+
+    await transport.event_sink(
+        ProviderEvent(type="input_transcript.added", role="user", text="late delegation")
+    )
+    await transport.event_sink(ProviderEvent(type="turn.done", role="user", text="late delegation"))
+    requested = [event for event in events if event.type is SessionEventType.DELEGATION_REQUESTED]
+    delegation_id = requested[0].metadata["delegation_id"]
+    assert isinstance(delegation_id, str)
+
+    assert await service.handle_client_message(
+        {
+            "label": "kassette",
+            "type": "delegation.complete",
+            "data": {"delegation_id": delegation_id, "text": "Agent response."},
+        }
+    )
+    assert transport.sent_messages == []
+
+    await transport.event_sink(
+        ProviderEvent(type="turn.done", role="assistant", text="direct provider answer")
+    )
+    await transport.event_sink(ProviderEvent(type="output_audio.delta"))
+    await transport.event_sink(
+        ProviderEvent(type="turn.done", role="assistant", text="Agent response.")
+    )
+    assert transport.sent_messages == [
+        {
+            "type": "session.context.append",
+            "channel": "speakable",
+            "content": [{"type": "input_text", "text": "Agent response."}],
+        }
+    ]
+
+    await transport.event_sink(
+        ProviderEvent(type="input_transcript.added", role="user", text="late")
+    )
+    await transport.event_sink(
+        ProviderEvent(
+            type="delegation.created",
+            delegation_id="provider-repeated",
+            text="late delegation",
+        )
+    )
+    await transport.event_sink(
+        ProviderEvent(type="input_transcript.added", role="user", text=" delegation")
+    )
+    await transport.event_sink(ProviderEvent(type="turn.done", role="user", text="late delegation"))
+    repeated_request = [
+        event for event in events if event.type is SessionEventType.DELEGATION_REQUESTED
+    ][-1]
+    repeated_id = repeated_request.metadata["delegation_id"]
+    assert repeated_id == "provider-repeated"
+    assert (
+        len([event for event in events if event.type is SessionEventType.DELEGATION_REQUESTED]) == 2
+    )
+    assert await service.handle_client_message(
+        {
+            "label": "kassette",
+            "type": "delegation.complete",
+            "data": {"delegation_id": repeated_id, "text": "New answer."},
+        }
+    )
+    assert transport.sent_messages[-1] == {
+        "type": "delegation.context.append",
+        "delegation_item_id": "provider-repeated",
+        "content": [{"type": "input_text", "text": "New answer."}],
+    }
+    await transport.event_sink(ProviderEvent(type="output_audio.delta"))
+    await transport.event_sink(
+        ProviderEvent(type="turn.done", role="assistant", text="New answer.")
+    )
+
+    await transport.event_sink(
+        ProviderEvent(
+            type="delegation.created",
+            delegation_id="provider-unrelated",
+            text="unrelated future turn",
+        )
+    )
+    await transport.event_sink(
+        ProviderEvent(
+            type="delegation.created",
+            delegation_id="provider-delegation-late",
+            text="late delegation",
+        )
+    )
+
+    delegation_requests = [
+        event for event in events if event.type is SessionEventType.DELEGATION_REQUESTED
+    ]
+    assert len(delegation_requests) == 3
+    assert delegation_requests[-1].metadata["delegation_id"] == "provider-unrelated"
+    assert transport.sent_messages[-1] == {
+        "type": "delegation.context.append",
+        "delegation_item_id": "provider-delegation-late",
+        "channel": "commentary",
+        "content": [{"type": "input_text", "text": "Agent response."}],
+    }
+
+
+async def test_late_prior_delegation_does_not_replace_different_active_turn() -> None:
+    registry = SessionRegistry()
+    await registry.create("voice-1")
+    events: list[SessionEvent] = []
+    transports: list[FakeTransport] = []
+
+    def create_transport(**kwargs: Any) -> FakeTransport:
+        transport = FakeTransport(**kwargs)
+        transports.append(transport)
+        return transport
+
+    async def collect(event: SessionEvent) -> None:
+        events.append(event)
+
+    service = RecordingGPTLiveService(
+        session_id="voice-1",
+        registry=registry,
+        credentials=FakeCredentials(),
+        event_sink=collect,
+        transport_factory=create_transport,
+        client_delegation=True,
+    )
+    await service._start_session()  # pyright: ignore[reportPrivateUsage]
+    transport = transports[0]
+
+    await transport.event_sink(
+        ProviderEvent(type="input_transcript.added", role="user", text="late delegation")
+    )
+    await transport.event_sink(ProviderEvent(type="turn.done", role="user", text="late delegation"))
+    old_request = [
+        event for event in events if event.type is SessionEventType.DELEGATION_REQUESTED
+    ][-1]
+    old_id = old_request.metadata["delegation_id"]
+    assert isinstance(old_id, str)
+    assert await service.handle_client_message(
+        {
+            "label": "kassette",
+            "type": "delegation.complete",
+            "data": {"delegation_id": old_id, "text": "Old answer."},
+        }
+    )
+    await transport.event_sink(
+        ProviderEvent(type="turn.done", role="assistant", text="direct old answer")
+    )
+    await transport.event_sink(ProviderEvent(type="output_audio.delta"))
+    await transport.event_sink(
+        ProviderEvent(type="turn.done", role="assistant", text="Old answer.")
+    )
+
+    await transport.event_sink(
+        ProviderEvent(type="input_transcript.added", role="user", text="late")
+    )
+    await transport.event_sink(
+        ProviderEvent(
+            type="delegation.created",
+            delegation_id="provider-late-old",
+            text="late delegation",
+        )
+    )
+    await transport.event_sink(
+        ProviderEvent(type="input_transcript.added", role="user", text=" fee question")
+    )
+    await transport.event_sink(
+        ProviderEvent(type="turn.done", role="user", text="late fee question")
+    )
+
+    requests = [event for event in events if event.type is SessionEventType.DELEGATION_REQUESTED]
+    assert len(requests) == 2
+    assert requests[-1].text == "late fee question"
+    assert transport.sent_messages[-1] == {
+        "type": "delegation.context.append",
+        "delegation_item_id": "provider-late-old",
+        "channel": "commentary",
+        "content": [{"type": "input_text", "text": "Old answer."}],
+    }
+
+    await transport.event_sink(
+        ProviderEvent(type="input_transcript.added", role="user", text="third request")
+    )
+    await transport.event_sink(
+        ProviderEvent(
+            type="delegation.created",
+            delegation_id="provider-unrelated",
+            text="unrelated delegation",
+        )
+    )
+    await transport.event_sink(ProviderEvent(type="turn.done", role="user", text="third request"))
+
+    requests = [event for event in events if event.type is SessionEventType.DELEGATION_REQUESTED]
+    assert [request.metadata["delegation_id"] for request in requests[-2:]] == [
+        "provider-unrelated",
+        "kassette:voice-1:native:3",
+    ]
+    assert [request.text for request in requests[-2:]] == [
+        "unrelated delegation",
+        "third request",
+    ]
+    assert await service.handle_client_message(
+        {
+            "label": "kassette",
+            "type": "delegation.complete",
+            "data": {"delegation_id": "provider-unrelated", "text": "Unrelated answer."},
+        }
+    )
+    assert transport.sent_messages[-1] == {
+        "type": "delegation.context.append",
+        "delegation_item_id": "provider-unrelated",
+        "content": [{"type": "input_text", "text": "Unrelated answer."}],
+    }
+
+
+async def test_late_real_delegation_matches_pending_turn_text_in_order() -> None:
+    registry = SessionRegistry()
+    await registry.create("voice-1")
+    events: list[SessionEvent] = []
+    transports: list[FakeTransport] = []
+
+    def create_transport(**kwargs: Any) -> FakeTransport:
+        transport = FakeTransport(**kwargs)
+        transports.append(transport)
+        return transport
+
+    async def collect(event: SessionEvent) -> None:
+        events.append(event)
+
+    service = RecordingGPTLiveService(
+        session_id="voice-1",
+        registry=registry,
+        credentials=FakeCredentials(),
+        event_sink=collect,
+        transport_factory=create_transport,
+        client_delegation=True,
+    )
+    await service._start_session()  # pyright: ignore[reportPrivateUsage]
+    transport = transports[0]
+
+    for text in ("first turn", "second turn"):
+        await transport.event_sink(
+            ProviderEvent(type="input_transcript.added", role="user", text=text)
+        )
+        await transport.event_sink(ProviderEvent(type="turn.done", role="user", text=text))
+
+    requests = [event for event in events if event.type is SessionEventType.DELEGATION_REQUESTED]
+    first_id = requests[0].metadata["delegation_id"]
+    second_id = requests[1].metadata["delegation_id"]
+    assert isinstance(first_id, str)
+    assert isinstance(second_id, str)
+
+    await transport.event_sink(
+        ProviderEvent(
+            type="delegation.created",
+            delegation_id="provider-second",
+            text="second turn",
+        )
+    )
+    for delegation_id, answer in (
+        (first_id, "First answer."),
+        (second_id, "Second answer."),
+    ):
+        assert await service.handle_client_message(
+            {
+                "label": "kassette",
+                "type": "delegation.complete",
+                "data": {"delegation_id": delegation_id, "text": answer},
+            }
+        )
+
+    assert transport.sent_messages == []
+
+    await transport.event_sink(
+        ProviderEvent(type="turn.done", role="assistant", text="direct first answer")
+    )
+    assert transport.sent_messages == [
+        {
+            "type": "session.context.append",
+            "channel": "speakable",
+            "content": [{"type": "input_text", "text": "First answer."}],
+        }
+    ]
+
+    await transport.event_sink(ProviderEvent(type="output_audio.delta"))
+    await transport.event_sink(
+        ProviderEvent(type="turn.done", role="assistant", text="First answer.")
+    )
+    assert transport.sent_messages == [
+        {
+            "type": "session.context.append",
+            "channel": "speakable",
+            "content": [{"type": "input_text", "text": "First answer."}],
+        },
+        {
+            "type": "delegation.context.append",
+            "delegation_item_id": "provider-second",
+            "content": [{"type": "input_text", "text": "Second answer."}],
+        },
+    ]
+
+
 async def test_client_delegation_round_trip_uses_matching_pi_response() -> None:
     registry = SessionRegistry()
     await registry.create("voice-1")

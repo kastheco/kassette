@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted
+Superseded by [ADR 0007](0007-reconcile-quicksilver-turns-on-the-sideband-stream.md).
+
+This record preserves the original terminal-only decision. ADR 0007 broadens client delegation to SmallWebRTC sessions and replaces provider-ID-first turn binding with finalized-transcript reconciliation.
 
 ## Context
 

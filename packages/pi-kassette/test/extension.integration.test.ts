@@ -269,8 +269,7 @@ describe.sequential("pi-kassette extension delivery", () => {
       capabilities: { mode: "native" },
     });
 
-    app.press("\u001b[32;2u");
-    app.press("\u001b[32;2u");
+    app.press("a");
     app.emit("transcript.delta", { role: "user", text: "wait" });
     app.emit("transcript.delta", { role: "user", text: "for" });
     app.emit("transcript.delta", { role: "user", text: "enter" });

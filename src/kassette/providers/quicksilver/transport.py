@@ -128,6 +128,7 @@ class QuicksilverTransport:
         self._sideband_task: asyncio.Task[None] | None = None
         self._remote_audio_tasks: set[asyncio.Task[None]] = set()
         self._event_tasks: set[asyncio.Future[None]] = set()
+        self._event_dispatch_lock = asyncio.Lock()
         self._connected = False
         self._closed = False
         self._close_task: asyncio.Task[None] | None = None
@@ -265,7 +266,7 @@ class QuicksilverTransport:
                 return
             event = parse_provider_event(message)
             if event is not None:
-                self._spawn_event(self._event_sink(event))
+                self._spawn_event(self._dispatch_provider_event(event))
 
         @peer.on("track")
         def on_track(track: MediaStreamTrack) -> None:
@@ -296,7 +297,10 @@ class QuicksilverTransport:
                 for output in resampler.resample(frame):
                     size = output.samples * 2
                     audio = bytes(output.planes[0])[:size]
-                    if audio:
+                    # The sideband carries the same PCM inside ordered output_audio.delta
+                    # events. Use RTP only as a pre-sideband fallback to avoid duplicates and
+                    # keep response ownership aligned with the control-event sequence.
+                    if audio and (self._sideband is None or self._sideband.closed):
                         await self._audio_sink(
                             AudioChunk(audio=audio, sample_rate=24_000, num_channels=1)
                         )
@@ -304,6 +308,22 @@ class QuicksilverTransport:
             return
         except MediaStreamError:
             await self._report_disconnect()
+
+    async def _dispatch_provider_event(self, event: ProviderEvent) -> None:
+        async with self._event_dispatch_lock:
+            await self._event_sink(event)
+            if (
+                event.audio is not None
+                and event.sample_rate is not None
+                and event.num_channels is not None
+            ):
+                await self._audio_sink(
+                    AudioChunk(
+                        audio=event.audio,
+                        sample_rate=event.sample_rate,
+                        num_channels=event.num_channels,
+                    )
+                )
 
     def _spawn_event(self, awaitable: Awaitable[None]) -> None:
         task = asyncio.ensure_future(awaitable)
@@ -348,7 +368,7 @@ class QuicksilverTransport:
             if message.type == aiohttp.WSMsgType.TEXT:
                 event = parse_provider_event(message.data)
                 if event is not None:
-                    await self._event_sink(event)
+                    await self._dispatch_provider_event(event)
             elif message.type in {aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSED}:
                 break
         await self._report_disconnect()

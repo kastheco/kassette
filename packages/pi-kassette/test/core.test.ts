@@ -137,7 +137,8 @@ describe("voice surface keys", () => {
   it("keeps plain Space distinct from manual-send input", () => {
     expect(voiceSurfaceInput(" ", false)).toBe("toggle-input");
     expect(voiceSurfaceInput("a", false)).toBe("toggle-auto-send");
-    expect(voiceSurfaceInput("\u001b[32;2u", false)).toBe("toggle-auto-send");
+    expect(voiceSurfaceInput("A", false)).toBe("toggle-auto-send");
+    expect(voiceSurfaceInput("\u001b[32;2u", false)).toBe("extension");
   });
 
   it("always exits on Escape even when Pi also maps Escape to interrupt", () => {

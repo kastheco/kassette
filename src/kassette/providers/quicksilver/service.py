@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any, Protocol, cast
 
 from pipecat.frames.frames import (
@@ -33,6 +35,7 @@ from kassette.providers.quicksilver.protocol import (
     ProviderEvent,
     build_delegation_response,
     build_delegation_unavailable,
+    build_spoken_context,
 )
 from kassette.providers.quicksilver.transport import QuicksilverTransport
 from kassette.sessions import SessionNotFoundError, SessionRegistry, SessionRegistryError
@@ -45,6 +48,10 @@ for technical detail aloud. The client cannot delegate work to another agent in
 this first delivery, so answer with your own knowledge and never request client
 delegation.
 """
+
+_LATE_DELEGATION_TTL_SECONDS = 30.0
+_MAX_SYNTHETIC_TOMBSTONES = 64
+_MAX_DEFERRED_DELEGATIONS = 64
 
 DELEGATED_VOICE_INSTRUCTIONS = """You are kassette, the live voice interface for the client's agent.
 
@@ -82,6 +89,23 @@ def _has_audible_audio(audio: bytes, *, floor: int = 32) -> bool:
     return any(sample >= floor or sample <= -floor for sample in samples)
 
 
+def _normalize_turn_text(text: str | None) -> str:
+    return " ".join((text or "").split()).casefold()
+
+
+@dataclass(slots=True)
+class _SyntheticDelegation:
+    client_id: str
+    turn_id: str
+    text: str
+    answer: str | None = None
+    real_id: str | None = None
+    provider_resolved: bool = False
+    response_sent: bool = False
+    response_spoken: bool = False
+    completed_at: float | None = None
+
+
 class GPTLiveService(FrameProcessor):
     """Keep Quicksilver details behind a normal Pipecat audio processor."""
 
@@ -114,6 +138,16 @@ class GPTLiveService(FrameProcessor):
         self._publish_client_events = publish_client_events
         self._client_event_sequence = 0
         self._pending_delegations: set[str] = set()
+        self._synthetic_delegations: dict[str, _SyntheticDelegation] = {}
+        self._deferred_provider_delegations: list[ProviderEvent] = []
+        self._active_delegation_id: str | None = None
+        self._active_response_delegation_id: str | None = None
+        self._awaiting_client_output_start = False
+        self._unauthorized_output_active = False
+        self._active_user_turn_id: str | None = None
+        self._user_turn_number = 0
+        self._user_transcript = ""
+        self._client_output_authorized = not client_delegation
         self._transport = transport_factory(
             session_id=session_id,
             credentials=credentials,
@@ -179,8 +213,17 @@ class GPTLiveService(FrameProcessor):
             or len(text) > 32_000
         ):
             return False
-        await self._transport.send(build_delegation_response(delegation_id, text.strip()))
+        answer = text.strip()
+        synthetic = self._synthetic_delegations.get(delegation_id)
         self._pending_delegations.remove(delegation_id)
+        if synthetic is not None:
+            synthetic.answer = answer
+            await self._flush_synthetic_response()
+            return True
+        await self._transport.send(build_delegation_response(delegation_id, answer))
+        self._active_response_delegation_id = delegation_id
+        self._awaiting_client_output_start = True
+        self._client_output_authorized = False
         return True
 
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
@@ -239,7 +282,7 @@ class GPTLiveService(FrameProcessor):
                 return
             await self._transition(SessionState.INTERRUPTING)
             self._speaking = False
-            self._pending_delegations.clear()
+            self._clear_delegations()
             try:
                 await self._transport.interrupt()
             except BaseException:
@@ -264,7 +307,7 @@ class GPTLiveService(FrameProcessor):
         async with self._close_lock:
             if self._cleanup_task is None:
                 self._closed = True
-                self._pending_delegations.clear()
+                self._clear_delegations()
                 self._cleanup_task = asyncio.create_task(self._close_session())
             task = self._cleanup_task
         await asyncio.shield(task)
@@ -299,6 +342,9 @@ class GPTLiveService(FrameProcessor):
             return
         if not _has_audible_audio(chunk.audio):
             return
+        if self._client_delegation and not self._client_output_authorized:
+            self._unauthorized_output_active = True
+            return
         if not self._speaking:
             self._speaking = True
             await self._transition(SessionState.SPEAKING)
@@ -323,17 +369,62 @@ class GPTLiveService(FrameProcessor):
         if event.type == "session.started":
             await self._transition(SessionState.LISTENING, provider_session_id=event.session_id)
             return
+        if event.type == "output_audio.delta":
+            self._authorize_client_output_start()
+            return
         if event.type in {"input_transcript.added", "output_transcript.added"}:
-            await self._emit_event(
-                SessionEvent(
-                    session_id=self._session_id,
-                    type=SessionEventType.TRANSCRIPT_DELTA,
-                    role=_role(event),
-                    text=event.text,
+            if event.role == "user":
+                starting_turn = self._active_user_turn_id is None
+                if starting_turn and self._active_delegation_id is None:
+                    self._client_output_authorized = not self._client_delegation
+                turn_id = self._ensure_user_turn_id()
+                self._user_transcript += event.text or ""
+                await self._emit_event(
+                    SessionEvent(
+                        session_id=self._session_id,
+                        type=SessionEventType.TRANSCRIPT_DELTA,
+                        role=TranscriptRole.USER,
+                        text=self._user_transcript,
+                        metadata={"turn_id": turn_id},
+                    )
                 )
-            )
+            else:
+                self._authorize_client_output_start()
+            if event.role != "user" and (
+                not self._client_delegation or self._client_output_authorized
+            ):
+                await self._emit_event(
+                    SessionEvent(
+                        session_id=self._session_id,
+                        type=SessionEventType.TRANSCRIPT_DELTA,
+                        role=_role(event),
+                        text=event.text,
+                    )
+                )
+            elif event.role != "user":
+                self._unauthorized_output_active = True
             return
         if event.type == "turn.done":
+            if event.role == "user":
+                turn_id = self._ensure_user_turn_id()
+                final_text = (event.text or self._user_transcript).strip()
+                if final_text:
+                    self._user_transcript = final_text
+                    await self._emit_event(
+                        SessionEvent(
+                            session_id=self._session_id,
+                            type=SessionEventType.TRANSCRIPT_FINAL,
+                            role=TranscriptRole.USER,
+                            text=final_text,
+                            metadata={"turn_id": turn_id},
+                        )
+                    )
+                if self._client_delegation:
+                    await self._resolve_deferred_provider_delegations(final_text)
+                    if final_text and self._active_delegation_id is None:
+                        await self._request_synthetic_delegation(turn_id, final_text)
+                self._finish_user_turn()
+                return
             if event.role == "assistant" and self._speaking:
                 self._speaking = False
                 await self._transition(SessionState.LISTENING)
@@ -344,26 +435,44 @@ class GPTLiveService(FrameProcessor):
                         state=SessionState.LISTENING,
                     )
                 )
-            await self._emit_event(
-                SessionEvent(
-                    session_id=self._session_id,
-                    type=SessionEventType.TRANSCRIPT_FINAL,
-                    role=_role(event),
-                    text=event.text,
-                )
-            )
-            return
-        if event.type == "delegation.created" and event.delegation_id:
-            if self._client_delegation:
-                self._pending_delegations.add(event.delegation_id)
+            if not self._client_delegation or self._client_output_authorized:
                 await self._emit_event(
                     SessionEvent(
                         session_id=self._session_id,
-                        type=SessionEventType.DELEGATION_REQUESTED,
+                        type=SessionEventType.TRANSCRIPT_FINAL,
+                        role=_role(event),
                         text=event.text,
-                        metadata={"delegation_id": event.delegation_id},
                     )
                 )
+                if self._active_response_delegation_id is not None:
+                    synthetic = self._synthetic_delegations.get(self._active_response_delegation_id)
+                    if synthetic is not None:
+                        synthetic.response_spoken = True
+                        synthetic.completed_at = time.monotonic()
+            if event.role == "assistant":
+                if self._client_delegation and self._active_response_delegation_id is None:
+                    unresolved = self._next_provider_unresolved_synthetic()
+                    if unresolved is not None:
+                        unresolved.provider_resolved = True
+                self._client_output_authorized = not self._client_delegation
+                self._active_response_delegation_id = None
+                self._awaiting_client_output_start = False
+                self._unauthorized_output_active = False
+                await self._flush_synthetic_response()
+                self._prune_synthetic_delegations()
+            return
+        if event.type == "delegation.created" and event.delegation_id:
+            if self._client_delegation:
+                if self._active_user_turn_id is not None:
+                    if len(self._deferred_provider_delegations) >= _MAX_DEFERRED_DELEGATIONS:
+                        await self._fail(
+                            "provider_protocol_error",
+                            message="too many deferred provider delegations",
+                        )
+                        return
+                    self._deferred_provider_delegations.append(event)
+                    return
+                await self._handle_client_provider_delegation(event)
             else:
                 await self._transport.send(build_delegation_unavailable(event.delegation_id))
                 await self._emit_event(
@@ -384,6 +493,212 @@ class GPTLiveService(FrameProcessor):
             return
         if event.type == "error":
             await self._fail("provider_error", message="provider error")
+
+    def _ensure_user_turn_id(self) -> str:
+        if self._active_user_turn_id is None:
+            self._user_turn_number += 1
+            self._active_user_turn_id = f"{self._session_id}:native:{self._user_turn_number}"
+        return self._active_user_turn_id
+
+    async def _resolve_deferred_provider_delegations(self, final_text: str) -> None:
+        deferred = self._deferred_provider_delegations
+        self._deferred_provider_delegations = []
+        if not deferred:
+            return
+
+        normalized_final = _normalize_turn_text(final_text)
+        current_index = next(
+            (
+                index
+                for index, event in enumerate(deferred)
+                if _normalize_turn_text(event.text) == normalized_final
+            ),
+            None,
+        )
+        if current_index is None and len(deferred) == 1 and not deferred[0].text:
+            current_index = 0
+
+        if current_index is not None:
+            await self._handle_client_provider_delegation(
+                deferred[current_index],
+                bind_active=True,
+                match_synthetic=False,
+                fallback_text=final_text,
+            )
+        for index, event in enumerate(deferred):
+            if index == current_index:
+                continue
+            await self._handle_client_provider_delegation(event, bind_active=False)
+
+    async def _handle_client_provider_delegation(
+        self,
+        event: ProviderEvent,
+        *,
+        bind_active: bool = True,
+        match_synthetic: bool = True,
+        fallback_text: str = "",
+    ) -> None:
+        if event.delegation_id is None:
+            return
+        synthetic = self._match_synthetic_delegation(event.text) if match_synthetic else None
+        if synthetic is not None:
+            synthetic.real_id = event.delegation_id
+            synthetic.provider_resolved = True
+            if synthetic.answer is not None and synthetic.response_sent:
+                await self._transport.send(
+                    build_delegation_response(
+                        event.delegation_id,
+                        synthetic.answer,
+                        channel="commentary",
+                    )
+                )
+                if synthetic.response_spoken:
+                    self._synthetic_delegations.pop(synthetic.client_id, None)
+            else:
+                await self._flush_synthetic_response()
+            return
+
+        if bind_active:
+            self._active_delegation_id = event.delegation_id
+        self._pending_delegations.add(event.delegation_id)
+        await self._emit_event(
+            SessionEvent(
+                session_id=self._session_id,
+                type=SessionEventType.DELEGATION_REQUESTED,
+                text=event.text or fallback_text or self._user_transcript,
+                metadata={"delegation_id": event.delegation_id},
+            )
+        )
+
+    async def _request_synthetic_delegation(self, turn_id: str, text: str) -> None:
+        self._prune_synthetic_delegations()
+        delegation_id = f"kassette:{turn_id}"[:256]
+        self._active_delegation_id = delegation_id
+        self._pending_delegations.add(delegation_id)
+        self._synthetic_delegations[delegation_id] = _SyntheticDelegation(
+            client_id=delegation_id,
+            turn_id=turn_id,
+            text=text,
+        )
+        await self._emit_event(
+            SessionEvent(
+                session_id=self._session_id,
+                type=SessionEventType.DELEGATION_REQUESTED,
+                text=text,
+                metadata={"delegation_id": delegation_id},
+            )
+        )
+
+    def _match_synthetic_delegation(
+        self,
+        provider_text: str | None,
+    ) -> _SyntheticDelegation | None:
+        self._prune_synthetic_delegations()
+        unresolved = [
+            delegation
+            for delegation in self._synthetic_delegations.values()
+            if delegation.real_id is None
+        ]
+        active = [delegation for delegation in unresolved if not delegation.response_sent]
+        normalized = _normalize_turn_text(provider_text)
+        if normalized:
+            for delegation in active:
+                if _normalize_turn_text(delegation.text) == normalized:
+                    return delegation
+            for delegation in unresolved:
+                if _normalize_turn_text(delegation.text) == normalized:
+                    return delegation
+        return active[0] if active and not normalized else None
+
+    def _next_provider_unresolved_synthetic(self) -> _SyntheticDelegation | None:
+        return next(
+            (
+                delegation
+                for delegation in self._synthetic_delegations.values()
+                if not delegation.provider_resolved and not delegation.response_sent
+            ),
+            None,
+        )
+
+    async def _send_synthetic_response(
+        self,
+        delegation: _SyntheticDelegation,
+    ) -> None:
+        if (
+            delegation.response_sent
+            or delegation.answer is None
+            or not delegation.provider_resolved
+            or self._active_response_delegation_id is not None
+            or self._unauthorized_output_active
+        ):
+            return
+        message = (
+            build_delegation_response(delegation.real_id, delegation.answer)
+            if delegation.real_id is not None
+            else build_spoken_context(delegation.answer)
+        )
+        await self._transport.send(message)
+        delegation.response_sent = True
+        self._active_response_delegation_id = delegation.client_id
+        self._awaiting_client_output_start = True
+        self._client_output_authorized = False
+
+    def _authorize_client_output_start(self) -> None:
+        if (
+            self._client_delegation
+            and self._active_response_delegation_id is not None
+            and self._awaiting_client_output_start
+        ):
+            self._awaiting_client_output_start = False
+            self._unauthorized_output_active = False
+            self._client_output_authorized = True
+
+    async def _flush_synthetic_response(self) -> None:
+        if self._active_response_delegation_id is not None or self._unauthorized_output_active:
+            return
+        for delegation in self._synthetic_delegations.values():
+            if delegation.answer is None or delegation.response_sent:
+                continue
+            if not delegation.provider_resolved:
+                return
+            await self._send_synthetic_response(delegation)
+            return
+
+    def _prune_synthetic_delegations(self) -> None:
+        now = time.monotonic()
+        expired = [
+            client_id
+            for client_id, delegation in self._synthetic_delegations.items()
+            if delegation.completed_at is not None
+            and now - delegation.completed_at >= _LATE_DELEGATION_TTL_SECONDS
+        ]
+        for client_id in expired:
+            self._synthetic_delegations.pop(client_id, None)
+
+        tombstones = [
+            delegation
+            for delegation in self._synthetic_delegations.values()
+            if delegation.completed_at is not None
+        ]
+        for delegation in tombstones[:-_MAX_SYNTHETIC_TOMBSTONES]:
+            self._synthetic_delegations.pop(delegation.client_id, None)
+
+    def _finish_user_turn(self) -> None:
+        self._active_user_turn_id = None
+        self._active_delegation_id = None
+        self._user_transcript = ""
+
+    def _clear_delegations(self) -> None:
+        self._pending_delegations.clear()
+        self._synthetic_delegations.clear()
+        self._deferred_provider_delegations.clear()
+        self._active_delegation_id = None
+        self._active_response_delegation_id = None
+        self._awaiting_client_output_start = False
+        self._active_user_turn_id = None
+        self._user_transcript = ""
+        self._unauthorized_output_active = False
+        self._client_output_authorized = not self._client_delegation
 
     async def _transition(
         self,
@@ -417,6 +732,7 @@ class GPTLiveService(FrameProcessor):
         async with self._close_lock:
             if self._cleanup_task is None:
                 self._closed = True
+                self._clear_delegations()
                 self._cleanup_task = asyncio.create_task(
                     self._fail_session(error_code, message=message)
                 )

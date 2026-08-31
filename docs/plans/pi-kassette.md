@@ -88,7 +88,7 @@ The automated checks need to pass, but this isn't done until the real path works
 5. see and hear Pi's response through the selected provider
 6. speak over Pi and stop both playback and the active turn
 7. pause and resume with `Space`
-8. toggle auto-send with `Shift+Space`
+8. toggle auto-send with `A`
 9. return to the normal editor without losing an unsent draft
 10. force one control-channel disconnect without duplicate text or speech
 

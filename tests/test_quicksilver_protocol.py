@@ -41,6 +41,17 @@ def test_parse_call_id_ignores_invalid_location() -> None:
     assert parse_call_id("https://example.test/calls/not-a-call") is None
 
 
+def test_parse_ordered_output_audio_event() -> None:
+    audio = parse_provider_event({"type": "output_audio.delta", "audio": "AQIDBA=="})
+
+    assert audio is not None
+    assert audio.type == "output_audio.delta"
+    assert audio.audio == b"\x01\x02\x03\x04"
+    assert audio.sample_rate == 24_000
+    assert audio.num_channels == 1
+    assert parse_provider_event({"type": "output_audio.delta", "audio": "not base64"}) is None
+
+
 def test_parse_transcript_and_unknown_events() -> None:
     transcript = parse_provider_event(
         '{"type":"turn.done","turn":{"role":"assistant","transcript":"hello"}}'
