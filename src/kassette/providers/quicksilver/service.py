@@ -196,6 +196,13 @@ class GPTLiveService(FrameProcessor):
         if record.get("label") != "kassette":
             return False
         if record.get("type") in {"input.pause", "input.resume"}:
+            await self._emit_event(
+                SessionEvent(
+                    session_id=self._session_id,
+                    type=SessionEventType.INPUT_STATE_CHANGED,
+                    metadata={"paused": record["type"] == "input.pause"},
+                )
+            )
             return True
         if record.get("type") != "delegation.complete":
             return False
