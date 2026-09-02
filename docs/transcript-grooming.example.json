@@ -1,9 +1,12 @@
 {
-  "version": 1,
+  "version": 2,
   "lowercase": false,
   "preserve_pronoun_i": true,
   "collapse_whitespace": true,
   "word_overrides": {
     "example misrecognition": "preferred spelling"
-  }
+  },
+  "filter_filler_words": false,
+  "filler_words": ["um", "uh"],
+  "symbol_replacements": false
 }

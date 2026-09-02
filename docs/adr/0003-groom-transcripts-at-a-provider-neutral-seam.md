@@ -8,7 +8,7 @@ Accepted
 
 Speech-to-text providers commonly misrecognize project names and return casing that does not match a user's dictation style. Kassette needs to support those corrections without embedding one user's vocabulary in the open-source service or coupling grooming to Gemini, Fish Audio, or a voice client.
 
-HyperWhisper currently gives the local user useful deterministic behavior: boundaried word overrides and lowercase output with the pronoun `I` restored. Its spoken-symbol replacement is not suitable for Kassette's conversational mode: a recovered transcript changed the ordinary phrase “during that period” into “during that .”.
+HyprWhspr provides useful deterministic behavior: boundaried word overrides, lowercase output with the pronoun `I` restored, filler-word filtering, and spoken-symbol commands. Symbol replacement is dangerous in conversational transcription because ordinary words such as “period” can be changed into punctuation, so it must be an explicit profile opt-in.
 
 Live transcript latency must remain independent of TTS. Grooming therefore cannot move transcript events back behind the TTS stage.
 
@@ -31,15 +31,17 @@ The default adapter is no-op. A deterministic rules adapter supports:
 - boundaried word overrides;
 - optional lowercase output;
 - optional restoration of standalone and contracted `I`;
-- whitespace normalization.
+- whitespace normalization;
+- opt-in filler-word filtering that removes filler-owned punctuation while preserving sentence structure;
+- opt-in spoken-symbol commands, including `new line`.
 
 Both interim and final frames use deterministic rules so the visible transcript does not change style only at finalization. Future expensive or non-idempotent adapters may inspect `request.final` and groom final frames only.
 
-Profiles are versioned JSON files selected through `KASSETTE_TRANSCRIPT_GROOMING_PROFILE`. Personal profiles live outside the repository. Kassette bounds profile size, override count, override length, and adapter runtime. Grooming failures, timeouts, or suspicious empty results fail open to the provider transcript.
+Profiles are versioned JSON files selected through `KASSETTE_TRANSCRIPT_GROOMING_PROFILE`. Personal profiles live outside the repository. Version 1 retains its original behavior. Version 2 adds filler and symbol fields, both disabled by default, so existing profiles cannot silently enable destructive replacements. Kassette bounds profile size, override and filler counts, term length, and adapter runtime. Grooming failures, timeouts, or suspicious empty results fail open to the provider transcript.
 
 Diagnostics report adapter name, final/interim state, changed status, latency, and error type without logging transcript text. The in-memory result retains only the replacement text needed by the pipeline; raw provider text remains on the frame until a successful replacement.
 
-Spoken-symbol commands are deliberately excluded from the conversational rules adapter.
+Spoken-symbol commands are available only when a version 2 profile explicitly enables `symbol_replacements`.
 
 ## Consequences
 

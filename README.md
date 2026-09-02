@@ -68,7 +68,7 @@ kassette preserves provider transcripts by default. to apply fast deterministic 
 KASSETTE_TRANSCRIPT_GROOMING_PROFILE=/absolute/path/to/transcript-grooming.json
 ```
 
-the version 1 profile supports boundaried word overrides, whitespace normalization, optional lowercase output, and restoration of the pronoun `I`. rules apply to interim and final transcripts, fail open to provider text, and stay upstream of tts so grooming can't delay audio playback. personal vocabulary belongs in the external profile, not the repository. see [adr 0003](docs/adr/0003-groom-transcripts-at-a-provider-neutral-seam.md).
+version 1 profiles support boundaried word overrides, whitespace normalization, optional lowercase output, and restoration of the pronoun `I`. version 2 adds opt-in filler-word filtering and spoken-symbol commands, including `new line`. these transformations are disabled by default and are never enabled for existing version 1 profiles. rules apply to interim and final transcripts, fail open to provider text, and stay upstream of tts so grooming can't delay audio playback. personal vocabulary belongs in the external profile, not the repository. see [adr 0003](docs/adr/0003-groom-transcripts-at-a-provider-neutral-seam.md).
 
 ### runtime provider switching
 

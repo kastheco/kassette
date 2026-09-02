@@ -61,7 +61,7 @@ async def test_noop_groomer_preserves_provider_text() -> None:
     assert result == GroomedTranscript(text="Provider Text", changed=False, adapter="none")
 
 
-async def test_rule_groomer_matches_hyperwhisper_style_without_symbol_commands() -> None:
+async def test_rule_groomer_applies_lowercase_and_word_overrides() -> None:
     groomer = RuleTranscriptGroomer(
         TranscriptGroomingProfile(
             lowercase=True,
@@ -85,6 +85,46 @@ async def test_rule_groomer_matches_hyperwhisper_style_without_symbol_commands()
     assert result.text == "I'm using the tui with kasmos. during that period, chezmoi worked."
     assert result.changed is True
     assert "period" in result.text
+
+
+async def test_version_one_profile_does_not_enable_new_transformations() -> None:
+    groomer = RuleTranscriptGroomer(TranscriptGroomingProfile(version=1))
+
+    result = await groomer.groom(
+        TranscriptGroomingRequest(text="Um, new line. During that period", final=True)
+    )
+
+    assert result.text == "Um, new line. During that period"
+    assert result.changed is False
+
+
+async def test_filler_filter_removes_owned_punctuation_and_keeps_sentence_structure() -> None:
+    groomer = RuleTranscriptGroomer(
+        TranscriptGroomingProfile(
+            version=2,
+            filter_filler_words=True,
+            filler_words=["well", "um"],
+        )
+    )
+
+    result = await groomer.groom(
+        TranscriptGroomingRequest(text="Well, um. okay. (um) Fine", final=True)
+    )
+
+    assert result.text == "Okay. Fine"
+
+
+async def test_symbol_replacements_render_commands_and_preserve_raw_punctuation() -> None:
+    groomer = RuleTranscriptGroomer(TranscriptGroomingProfile(version=2, symbol_replacements=True))
+
+    result = await groomer.groom(
+        TranscriptGroomingRequest(
+            text="hello comma world new line. open paren x close paren...",
+            final=True,
+        )
+    )
+
+    assert result.text == "hello, world\n(x)..."
 
 
 async def test_word_overrides_respect_unicode_word_boundaries_and_are_idempotent() -> None:
@@ -142,10 +182,13 @@ def test_profile_loader_uses_noop_by_default_and_rules_from_json(tmp_path: Path)
     path.write_text(
         json.dumps(
             {
-                "version": 1,
+                "version": 2,
                 "lowercase": True,
                 "preserve_pronoun_i": True,
                 "word_overrides": {"casmos": "kasmos"},
+                "filter_filler_words": True,
+                "filler_words": ["um"],
+                "symbol_replacements": True,
             }
         ),
         encoding="utf-8",
@@ -158,9 +201,12 @@ def test_profile_loader_uses_noop_by_default_and_rules_from_json(tmp_path: Path)
 
 def test_profile_rejects_unknown_versions_and_oversized_overrides(tmp_path: Path) -> None:
     versioned = tmp_path / "versioned.json"
-    versioned.write_text('{"version": 2}', encoding="utf-8")
+    versioned.write_text('{"version": 3}', encoding="utf-8")
     with pytest.raises(ValidationError):
         load_transcript_groomer(versioned)
 
     with pytest.raises(ValidationError, match="at most 256 characters"):
         TranscriptGroomingProfile(word_overrides={"x" * 257: "value"})
+
+    with pytest.raises(ValidationError, match="require a version 2 profile"):
+        TranscriptGroomingProfile(version=1, symbol_replacements=True)
