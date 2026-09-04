@@ -14,7 +14,7 @@ from pipecat.processors.frame_processor import FrameDirection
 from kassette.credentials import CodexCredentials
 from kassette.domain import AudioChunk, SessionEvent, SessionEventType, SessionState
 from kassette.providers.quicksilver.protocol import ProviderEvent
-from kassette.providers.quicksilver.service import GPTLiveService
+from kassette.providers.quicksilver.service import DELEGATED_VOICE_INSTRUCTIONS, GPTLiveService
 from kassette.sessions import SessionRegistry
 
 
@@ -147,6 +147,61 @@ async def test_silent_provider_audio_does_not_trap_session_in_speaking() -> None
     assert not any(isinstance(frame, OutputAudioRawFrame) for frame, _ in service.pushed_frames)
 
     await service._close()  # pyright: ignore[reportPrivateUsage]
+
+
+def test_delegated_voice_acknowledges_before_waiting_for_client_context() -> None:
+    instructions = DELEGATED_VOICE_INSTRUCTIONS.casefold()
+
+    assert "immediately say one short acknowledgment" in instructions
+    assert "remain silent" not in instructions
+
+
+async def test_client_delegation_enters_thinking_and_allows_one_live_acknowledgment() -> None:
+    registry = SessionRegistry()
+    await registry.create("voice-1")
+    events: list[SessionEvent] = []
+    transports: list[FakeTransport] = []
+
+    def create_transport(**kwargs: Any) -> FakeTransport:
+        transport = FakeTransport(**kwargs)
+        transports.append(transport)
+        return transport
+
+    async def collect(event: SessionEvent) -> None:
+        events.append(event)
+
+    service = RecordingGPTLiveService(
+        session_id="voice-1",
+        registry=registry,
+        credentials=FakeCredentials(),
+        event_sink=collect,
+        transport_factory=create_transport,
+        client_delegation=True,
+    )
+    await service._start_session()  # pyright: ignore[reportPrivateUsage]
+    transport = transports[0]
+
+    await transport.event_sink(
+        ProviderEvent(type="input_transcript.added", role="user", text="look into this")
+    )
+    await transport.event_sink(ProviderEvent(type="turn.done", role="user", text="look into this"))
+
+    assert (await registry.get("voice-1")).state is SessionState.THINKING
+
+    acknowledgment = AudioChunk(audio=b"\x40\x00" * 100, sample_rate=24_000, num_channels=1)
+    await transport.audio_sink(acknowledgment)
+    assert any(isinstance(frame, OutputAudioRawFrame) for frame, _ in service.pushed_frames)
+
+    await transport.event_sink(
+        ProviderEvent(
+            type="delegation.created",
+            delegation_id="provider-1",
+            text="look into this",
+        )
+    )
+    frames_before = len(service.pushed_frames)
+    await transport.audio_sink(acknowledgment)
+    assert len(service.pushed_frames) == frames_before
 
 
 async def test_client_delegation_falls_back_before_direct_provider_answer() -> None:
@@ -683,7 +738,7 @@ async def test_client_delegation_round_trip_uses_matching_pi_response() -> None:
             "session_id": "voice-1",
             "delegation_id": "delegation-1",
             "text": "inspect the repository",
-            "sequence": 3,
+            "sequence": 4,
         },
     }
     assert transports[0].sent_messages == []

@@ -127,6 +127,7 @@ _ALLOWED_TRANSITIONS: dict[SessionState, frozenset[SessionState]] = {
     ),
     SessionState.LISTENING: frozenset(
         {
+            SessionState.THINKING,
             SessionState.SPEAKING,
             SessionState.INTERRUPTING,
             SessionState.SWITCHING,
@@ -134,9 +135,18 @@ _ALLOWED_TRANSITIONS: dict[SessionState, frozenset[SessionState]] = {
             SessionState.FAILED,
         }
     ),
+    SessionState.THINKING: frozenset(
+        {
+            SessionState.SPEAKING,
+            SessionState.INTERRUPTING,
+            SessionState.CLOSING,
+            SessionState.FAILED,
+        }
+    ),
     SessionState.SPEAKING: frozenset(
         {
             SessionState.LISTENING,
+            SessionState.THINKING,
             SessionState.INTERRUPTING,
             SessionState.CLOSING,
             SessionState.FAILED,

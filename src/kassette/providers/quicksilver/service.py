@@ -55,10 +55,11 @@ _MAX_DEFERRED_DELEGATIONS = 64
 
 DELEGATED_VOICE_INSTRUCTIONS = """You are kassette, the live voice interface for the client's agent.
 
-Delegate every user request to the client. Remain silent and don't acknowledge
-the request before client context arrives. Once the client returns the agent's
-answer, present it naturally and faithfully in concise spoken form.
-Do not mention delegation, hidden context, or implementation details.
+Immediately say one short acknowledgment such as "Hmm, let me look into that."
+Then delegate every user request to the client and wait silently for client context.
+Do not answer the request yourself. Once the client returns the agent's answer,
+present it naturally and faithfully in concise spoken form. Do not mention delegation,
+hidden context, or implementation details.
 """
 
 
@@ -144,6 +145,7 @@ class GPTLiveService(FrameProcessor):
         self._active_response_delegation_id: str | None = None
         self._awaiting_client_output_start = False
         self._unauthorized_output_active = False
+        self._acknowledgment_allowed = False
         self._active_user_turn_id: str | None = None
         self._user_turn_number = 0
         self._user_transcript = ""
@@ -221,6 +223,7 @@ class GPTLiveService(FrameProcessor):
         ):
             return False
         answer = text.strip()
+        self._acknowledgment_allowed = False
         synthetic = self._synthetic_delegations.get(delegation_id)
         self._pending_delegations.remove(delegation_id)
         if synthetic is not None:
@@ -294,7 +297,11 @@ class GPTLiveService(FrameProcessor):
             if self._closed or not await self._is_current():
                 return
             snapshot = await self._registry.get(self._session_id)
-            if snapshot.state not in {SessionState.LISTENING, SessionState.SPEAKING}:
+            if snapshot.state not in {
+                SessionState.LISTENING,
+                SessionState.THINKING,
+                SessionState.SPEAKING,
+            }:
                 return
             await self._transition(SessionState.INTERRUPTING)
             self._speaking = False
@@ -358,7 +365,11 @@ class GPTLiveService(FrameProcessor):
             return
         if not _has_audible_audio(chunk.audio):
             return
-        if self._client_delegation and not self._client_output_authorized:
+        if (
+            self._client_delegation
+            and not self._client_output_authorized
+            and not self._acknowledgment_allowed
+        ):
             self._unauthorized_output_active = True
             return
         if not self._speaking:
@@ -436,6 +447,7 @@ class GPTLiveService(FrameProcessor):
                         )
                     )
                 if self._client_delegation:
+                    self._acknowledgment_allowed = True
                     await self._resolve_deferred_provider_delegations(final_text)
                     if final_text and self._active_delegation_id is None:
                         await self._request_synthetic_delegation(turn_id, final_text)
@@ -451,15 +463,24 @@ class GPTLiveService(FrameProcessor):
                 return
             if event.role == "assistant" and self._speaking:
                 self._speaking = False
-                await self._transition(SessionState.LISTENING)
+                resting_state = (
+                    SessionState.THINKING
+                    if self._client_delegation and self._pending_delegations
+                    else SessionState.LISTENING
+                )
+                await self._transition(resting_state)
                 await self._emit_event(
                     SessionEvent(
                         session_id=self._session_id,
                         type=SessionEventType.SPEECH_STOPPED,
-                        state=SessionState.LISTENING,
+                        state=resting_state,
                     )
                 )
-            if not self._client_delegation or self._client_output_authorized:
+            if (
+                not self._client_delegation
+                or self._client_output_authorized
+                or self._acknowledgment_allowed
+            ):
                 await self._emit_event(
                     SessionEvent(
                         session_id=self._session_id,
@@ -564,6 +585,7 @@ class GPTLiveService(FrameProcessor):
     ) -> None:
         if event.delegation_id is None:
             return
+        self._acknowledgment_allowed = False
         synthetic = self._match_synthetic_delegation(event.text) if match_synthetic else None
         if synthetic is not None:
             synthetic.real_id = event.delegation_id
@@ -585,6 +607,7 @@ class GPTLiveService(FrameProcessor):
         if bind_active:
             self._active_delegation_id = event.delegation_id
         self._pending_delegations.add(event.delegation_id)
+        await self._transition(SessionState.THINKING)
         await self._emit_event(
             SessionEvent(
                 session_id=self._session_id,
@@ -599,6 +622,7 @@ class GPTLiveService(FrameProcessor):
         delegation_id = f"kassette:{turn_id}"[:256]
         self._active_delegation_id = delegation_id
         self._pending_delegations.add(delegation_id)
+        await self._transition(SessionState.THINKING)
         self._synthetic_delegations[delegation_id] = _SyntheticDelegation(
             client_id=delegation_id,
             turn_id=turn_id,
@@ -727,6 +751,7 @@ class GPTLiveService(FrameProcessor):
         self._active_user_turn_id = None
         self._user_transcript = ""
         self._unauthorized_output_active = False
+        self._acknowledgment_allowed = False
         self._client_output_authorized = not self._client_delegation
 
     async def _transition(

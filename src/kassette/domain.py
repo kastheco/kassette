@@ -12,6 +12,7 @@ class SessionState(StrEnum):
     CREATED = "created"
     CONNECTING = "connecting"
     LISTENING = "listening"
+    THINKING = "thinking"
     SPEAKING = "speaking"
     INTERRUPTING = "interrupting"
     SWITCHING = "switching"
