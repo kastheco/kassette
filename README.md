@@ -38,6 +38,38 @@ the service only binds to a loopback address. both `serve` and `call` reject non
 
 message playback uses `POST /api/tts` on the same local service. the endpoint accepts `{ "text": "..." }`, returns mono 24 khz wav audio, and keeps a small process-local content cache. product clients should keep their own refresh-scoped audio cache so replay doesn't call the provider again.
 
+### Screenpipe batch transcription
+
+Kassette exposes `POST /v1/audio/transcriptions` for completed audio chunks using
+Google's `gemini-3.5-transcribe` model. This is separate from live voice sessions and
+does not change the selected live provider. Audio is sent to Google and uses your
+Gemini API quota and billing. The route sends inline audio with `store: false` and
+does not create Files API uploads or retain audio or transcripts locally. Google's
+API data-use policies still apply.
+
+Set `GOOGLE_API_KEY` and a random, at least 32-character
+`KASSETTE_TRANSCRIPTION_API_TOKEN` in the service's local environment, then restart
+kassette. The endpoint fails closed without the local token. Do not use your Google
+key as the local token. Browser requests with an `Origin` header are rejected.
+
+Configure Screenpipe:
+
+- Transcription engine: `openai-compatible`.
+- Endpoint: `http://127.0.0.1:7860` (Screenpipe appends `/v1/audio/transcriptions`).
+- API key: the local `KASSETTE_TRANSCRIPTION_API_TOKEN` value.
+- Model: `gemini-3.5-transcribe`.
+- Raw audio: enabled (PCM16 WAV). MP3 uploads are not supported.
+- Live meeting transcription: disabled for this batch-only integration.
+
+The multipart interface accepts `file`, `model`, `response_format=json`, and optional
+`language`, `prompt`, and `context`. Comma-separated prompt/context vocabulary is
+combined and deduplicated. Responses contain `{"text":"..."}`. WAV files must contain
+one or two channels, 8–48 kHz PCM16 audio, and at most 60 seconds. The entire multipart
+request is capped at 8 MiB before parsing. At most two requests are active; excess
+requests receive HTTP 429 without queueing. The request deadline is 25 seconds, below
+Screenpipe's 30-second upstream request budget. Malformed audio is rejected rather
+than passed to Google. Auth, provider, and timeout failures return sanitized errors.
+
 ### pi voice surface
 
 install the extension from this checkout:

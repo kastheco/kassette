@@ -544,6 +544,7 @@ if __name__ == "__main__":
 
     from kassette.terminal_api import TerminalSessionManager, create_terminal_router
     from kassette.terminal_runtime import run_terminal_voice_session
+    from kassette.transcription_api import install_transcription_route
     from kassette.tts_api import install_tts_route
 
     async def run_terminal(session: Any) -> None:
@@ -555,5 +556,6 @@ if __name__ == "__main__":
         )
 
     install_tts_route(app)
+    install_transcription_route(app)
     app.include_router(create_terminal_router(TerminalSessionManager(run_terminal)))
     main()

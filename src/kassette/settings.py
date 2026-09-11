@@ -70,6 +70,11 @@ class KassetteSettings(BaseSettings):
         min_length=1,
         validation_alias="GOOGLE_API_KEY",
     )
+    transcription_api_token: SecretStr | None = Field(
+        default=None,
+        min_length=32,
+        validation_alias="KASSETTE_TRANSCRIPTION_API_TOKEN",
+    )
     openai_api_key: SecretStr | None = Field(
         default=None,
         min_length=1,
@@ -111,12 +116,16 @@ class KassetteSettings(BaseSettings):
             raise RuntimeError("FISH_API_KEY is required for text-to-speech")
         return self.fish_api_key.get_secret_value()
 
+    def google_transcription_credential(self) -> str:
+        """Return the Gemini secret independently of the live provider selection."""
+        if self.google_api_key is None:
+            raise RuntimeError("GOOGLE_API_KEY is required for Gemini transcription")
+        return self.google_api_key.get_secret_value()
+
     def transcription_credential(self) -> str:
         """Return the selected cascade transcription provider's secret."""
         if self.transcription_provider == "gemini":
-            if self.google_api_key is None:
-                raise RuntimeError("GOOGLE_API_KEY is required for Gemini transcription")
-            return self.google_api_key.get_secret_value()
+            return self.google_transcription_credential()
         if self.openai_api_key is None:
             raise RuntimeError("OPENAI_API_KEY is required for OpenAI transcription")
         return self.openai_api_key.get_secret_value()
