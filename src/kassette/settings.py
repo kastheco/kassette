@@ -18,7 +18,7 @@ class KassetteSettings(BaseSettings):
         extra="ignore",
     )
 
-    voice_backend: Literal["cascade", "quicksilver"] = Field(
+    voice_backend: Literal["cascade", "quicksilver", "gemini-live"] = Field(
         default="cascade",
         validation_alias="KASSETTE_VOICE_BACKEND",
     )
@@ -74,6 +74,17 @@ class KassetteSettings(BaseSettings):
         default=None,
         min_length=32,
         validation_alias="KASSETTE_TRANSCRIPTION_API_TOKEN",
+    )
+    gemini_live_model: Literal[
+        "gemini-3.8-live",
+        "gemini-3.8-live-extended-thinking",
+    ] = Field(
+        default="gemini-3.8-live",
+        validation_alias="KASSETTE_GEMINI_LIVE_MODEL",
+    )
+    gemini_live_thinking_level: Literal["low", "medium", "high"] | None = Field(
+        default=None,
+        validation_alias="KASSETTE_GEMINI_LIVE_THINKING_LEVEL",
     )
     openai_api_key: SecretStr | None = Field(
         default=None,

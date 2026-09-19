@@ -20,6 +20,7 @@ from kassette.providers.cascade import (
     CascadedVoiceEvents,
     handle_client_message,
 )
+from kassette.providers.gemini_live import DelegatedGeminiLiveService
 from kassette.providers.quicksilver.service import GPTLiveService, TransportFactory
 from kassette.providers.quicksilver.transport import QuicksilverTransport
 from kassette.providers.runtime import (
@@ -163,8 +164,9 @@ def build_builtin_provider_registry(
     quicksilver_transport_factory: TransportFactory = QuicksilverTransport,
     quicksilver_client_delegation: bool = False,
     quicksilver_publish_client_events: bool = False,
+    gemini_live_publish_client_events: bool = False,
 ) -> VoiceProviderRegistry:
-    """Build the two real provider adapters behind one runtime registry."""
+    """Build the cascaded and native provider adapters behind one runtime registry."""
     transcription_key_available = (
         settings.google_api_key is not None
         if settings.transcription_provider == "gemini"
@@ -176,6 +178,11 @@ def build_builtin_provider_registry(
         else CredentialReadiness.MISSING
     )
     quicksilver_credentials = credential_provider or PiAuthCredentialProvider()
+    gemini_live_readiness = (
+        CredentialReadiness.READY
+        if settings.google_api_key is not None
+        else CredentialReadiness.MISSING
+    )
 
     def build_cascade(context: VoiceProviderBuildContext) -> PipelineProviderAdapter:
         transcription_api_key, fish_api_key = settings.cascade_credentials()
@@ -268,6 +275,27 @@ def build_builtin_provider_registry(
             message_handler=service.handle_client_message,
         )
 
+    def build_gemini_live(context: VoiceProviderBuildContext) -> PipelineProviderAdapter:
+        service = DelegatedGeminiLiveService(
+            session_id=context.session_id,
+            api_key=settings.google_transcription_credential(),
+            model=settings.gemini_live_model,
+            thinking_level=settings.gemini_live_thinking_level,
+            event_sink=context.event_sink,
+            publish_client_events=gemini_live_publish_client_events,
+            name="DelegatedGeminiLive",
+        )
+        events = CascadedVoiceEvents(
+            session_id=context.session_id,
+            event_sink=context.event_sink,
+            name="GeminiLiveEvents",
+        )
+        return PipelineProviderAdapter(
+            [service, events],
+            frame_sink=context.frame_sink,
+            message_handler=service.handle_client_message,
+        )
+
     return VoiceProviderRegistry(
         [
             VoiceProviderDefinition(
@@ -287,6 +315,14 @@ def build_builtin_provider_registry(
                     supports_input_pause=quicksilver_client_delegation,
                 ),
                 factory=build_quicksilver,
+            ),
+            VoiceProviderDefinition(
+                capabilities=VoiceProviderCapabilities(
+                    provider_id="gemini-live",
+                    mode=VoiceProviderMode.NATIVE,
+                    credential_readiness=gemini_live_readiness,
+                ),
+                factory=build_gemini_live,
             ),
         ]
     )
