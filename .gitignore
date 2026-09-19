@@ -13,6 +13,7 @@ node_modules/
 .env
 .env.*
 !.env.example
-.pi/
+.pi/*
+!.pi/settings.json
 /.worktrees/
 /artifacts/tts-comparison/
