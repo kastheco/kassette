@@ -8,6 +8,8 @@ from typing import Literal
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from kassette.sessions import AudioLeasePolicy, SessionConcurrencyPolicy
+
 
 class KassetteSettings(BaseSettings):
     """Credentials and provider choices for the cascaded voice pipeline."""
@@ -18,6 +20,20 @@ class KassetteSettings(BaseSettings):
         extra="ignore",
     )
 
+    runtime_mode: Literal["local", "hosted"] = Field(
+        default="local",
+        validation_alias="KASSETTE_RUNTIME_MODE",
+    )
+    service_secret: SecretStr | None = Field(
+        default=None,
+        min_length=32,
+        validation_alias="KASSETTE_SERVICE_SECRET",
+    )
+    ice_servers: SecretStr | None = Field(
+        default=None,
+        min_length=1,
+        validation_alias="KASSETTE_ICE_SERVERS",
+    )
     voice_backend: Literal["cascade", "quicksilver", "gemini-live"] = Field(
         default="cascade",
         validation_alias="KASSETTE_VOICE_BACKEND",
@@ -120,6 +136,22 @@ class KassetteSettings(BaseSettings):
         min_length=1,
         validation_alias="ELEVENLABS_VOICE_ID",
     )
+
+    @property
+    def hosted(self) -> bool:
+        return self.runtime_mode == "hosted"
+
+    @property
+    def audio_lease_policy(self) -> AudioLeasePolicy:
+        if self.hosted:
+            return AudioLeasePolicy.SESSION
+        return AudioLeasePolicy.PROCESS
+
+    @property
+    def session_concurrency_policy(self) -> SessionConcurrencyPolicy:
+        if self.hosted:
+            return SessionConcurrencyPolicy.SESSION
+        return SessionConcurrencyPolicy.PROCESS
 
     def fish_credential(self) -> str:
         """Return the Fish Audio secret for live or on-demand synthesis."""

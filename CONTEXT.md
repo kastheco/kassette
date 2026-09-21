@@ -1,11 +1,11 @@
 # kassette
 
-kassette provides one local boundary for realtime voice sessions used by multiple products and agent runtimes. It owns the live interaction, not the durable product conversation.
+kassette provides one local or hosted seam for realtime voice sessions used by multiple products and agent runtimes. it owns the live interaction, not the durable product conversation.
 
 ## Language
 
-**kassette service**  
-The long-running local service through which voice clients create and control voice sessions.  
+**kassette service**
+the long-running local or private hosted service through which voice clients create and control voice sessions.
 _Avoid_: voice daemon, Pipecat service, gateway process
 
 **Voice session**  
@@ -44,8 +44,8 @@ _Avoid_: voice override, cut-off, speech cancellation
 kassette's boundary around one provider-specific voice protocol and its event semantics.  
 _Avoid_: provider wrapper, driver
 
-**Audio lease**  
-Exclusive ownership of a local microphone and speaker path by one voice session.  
+**Audio lease**
+ownership of a media path by one voice-session generation. local hardware uses one process-scoped lease, while hosted WebRTC uses one lease per logical session ID.
 _Avoid_: audio lock, device reservation
 
 **Session event**  

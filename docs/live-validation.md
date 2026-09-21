@@ -1,6 +1,25 @@
 # Live validation
 
-## Automated checks
+## automated checks
+
+observed on the `release/0.2.0-hosted-runtime` release branch on 2026-09-21:
+
+```bash
+uv run ruff format --check .                         # 53 files already formatted
+uv run ruff check .                                  # passed
+uv run pyright                                       # 0 errors, 0 warnings, 0 informations
+uv run pytest                                        # 188 passed
+npm test --prefix packages/pi-kassette               # 34 passed
+npm run typecheck --prefix packages/pi-kassette      # passed
+uv lock --check                                      # resolved 120 packages
+uv build                                             # wheel and source archive built
+GOTOOLCHAIN=local go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 .github/workflows/release.yml  # passed
+podman build --build-arg KASSETTE_VERSION=0.2.0 --tag localhost/kassette:release-check .                  # passed
+```
+
+the focused container smoke started `localhost/kassette:0.2.0` with `PORT=7860`, a test service secret, and an authenticated `turns:` relay. it observed `GET /healthz` at HTTP 200 without auth, unauthenticated `POST /start` at HTTP 401, authenticated `POST /start` at HTTP 200, and the configured relay in `iceConfig`. `podman inspect` reported the `kassette` runtime user. graceful stop completed within 10 seconds, and container logs contained neither test secret nor TURN credential.
+
+hosted runtime coverage includes missing configuration, constant-time bearer enforcement, public health, `$PORT`, Pipecat ICE propagation, two simultaneous real aiortc sessions, same-ID reconnect isolation, stale generation cleanup, and the retained process-wide local hardware lease.
 
 Observed on committed revision `9bf3d415116cc0eeefdbe47ededef8a1212c8955` after adding OpenAI GPT Live Transcribe as a selectable cascade STT provider:
 
@@ -46,7 +65,40 @@ lifecycle timing records. The fixtures prove credentials, auth and SDP material,
 transcript contents, hostile metadata, response bodies, and provider-controlled strings are
 not emitted by diagnostics or errors and are rejected or truncated at explicit bounds.
 
-## Manual voice check
+## hosted runtime check
+
+run the private hosted shape locally with managed TURN credentials:
+
+```bash
+podman build --tag kassette:0.2.0 .
+podman run --rm --name kassette-hosted \
+  --env PORT=7860 \
+  --env KASSETTE_SERVICE_SECRET \
+  --env KASSETTE_ICE_SERVERS \
+  --publish 127.0.0.1:7860:7860 \
+  kassette:0.2.0
+curl --fail http://127.0.0.1:7860/healthz
+curl --fail \
+  --header "Authorization: Bearer $KASSETTE_SERVICE_SECRET" \
+  --header "Content-Type: application/json" \
+  --data '{"transport":"webrtc"}' \
+  http://127.0.0.1:7860/start
+```
+
+confirm that `/healthz` succeeds without auth and that `/start`, `/api/offer`, and `/sessions/{session_id}/api/offer` return `401` without the service bearer. inspect application and container logs and confirm that they contain no service secret, authorization header, TURN username or credential, provider key, SDP, transcript, audio, or provider response body.
+
+for the live Tower integration, use two authenticated users in separate browser profiles on Tower's HTTPS origin:
+
+1. open one voice session in browser A and one in browser B.
+2. speak in both sessions and confirm that both continue receiving media through managed TURN.
+3. reconnect browser A's same logical session. confirm that A's prior generation closes and its replacement becomes active.
+4. while A reconnects, keep speaking in browser B. confirm that B's generation, audio, and session state do not change.
+5. close A. confirm that B remains active.
+6. close B, stop the Kassette container, and confirm that all sessions and relay allocations are released.
+
+capture browser `RTCIceCandidate` evidence showing relay candidates. for Railway, the expected relay URL is `turns:` on port 443. do not validate against a direct public Kassette address, because the supported topology keeps Kassette private behind Tower.
+
+## manual local voice check
 
 1. Authenticate the `openai-codex` provider in Pi.
 2. Run `uv run kassette serve`.

@@ -9,8 +9,12 @@ from typing import Annotated
 from urllib.parse import urlsplit
 
 import typer
+from pydantic import ValidationError
 
-app = typer.Typer(no_args_is_help=True, help="Run and inspect the local kassette service.")
+from kassette.hosted import HostedConfigurationError, HostedRuntimeConfiguration
+from kassette.settings import load_settings
+
+app = typer.Typer(no_args_is_help=True, help="Run and inspect the kassette voice service.")
 _LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
 
 
@@ -40,22 +44,41 @@ def _client_origin(value: str) -> str:
 
 @app.command()
 def serve(
-    host: Annotated[str, typer.Option(help="Loopback address to bind.")] = "127.0.0.1",
-    port: Annotated[int, typer.Option(help="Local service port.")] = 7860,
+    host: Annotated[
+        str | None,
+        typer.Option(help="Address to bind. Non-loopback addresses require --hosted."),
+    ] = None,
+    port: Annotated[
+        int | None,
+        typer.Option(help="Service port. Hosted mode defaults to PORT."),
+    ] = None,
     client_origin: Annotated[
         list[str] | None,
         typer.Option("--client-origin", help="Additional exact browser origin to allow."),
     ] = None,
+    hosted: Annotated[
+        bool,
+        typer.Option(help="Enable authenticated hosted runtime mode."),
+    ] = False,
 ) -> None:
-    """Start the local kassette service."""
-    if host not in _LOOPBACK_HOSTS:
+    """Start kassette in local mode or explicit hosted mode."""
+    resolved_host = host or ("0.0.0.0" if hosted else "127.0.0.1")
+    resolved_port = _service_port(port, hosted=hosted)
+    if not hosted and resolved_host not in _LOOPBACK_HOSTS:
         raise typer.BadParameter(
-            "the first delivery only permits loopback addresses",
+            "local mode only permits loopback addresses",
             param_hint="host",
         )
-    origin = _loopback_url(host, port)
+    if hosted:
+        configuration = _hosted_configuration()
+        os.environ["KASSETTE_RUNTIME_MODE"] = "hosted"
+        os.environ["PIPECAT_ICE_SERVERS"] = configuration.ice_servers_json.get_secret_value()
+    else:
+        os.environ["KASSETTE_RUNTIME_MODE"] = "local"
+    origin = _loopback_url(resolved_host, resolved_port)
     allowed_origins = list(dict.fromkeys([origin, *map(_client_origin, client_origin or [])]))
-    typer.echo(f"Starting kassette on {origin}")
+    mode = "hosted" if hosted else "local"
+    typer.echo(f"Starting kassette in {mode} mode on {origin}")
     os.execv(
         sys.executable,
         [
@@ -65,13 +88,47 @@ def serve(
             "-t",
             "webrtc",
             "--host",
-            host,
+            resolved_host,
             "--port",
-            str(port),
+            str(resolved_port),
             "--allowed-origins",
             *allowed_origins,
         ],
     )
+
+
+def _service_port(port: int | None, *, hosted: bool) -> int:
+    if port is not None:
+        resolved = port
+    elif hosted:
+        raw_port = os.getenv("PORT")
+        if raw_port is None:
+            raise typer.BadParameter("PORT is required in hosted mode", param_hint="port")
+        try:
+            resolved = int(raw_port)
+        except ValueError as error:
+            raise typer.BadParameter("PORT must be an integer", param_hint="port") from error
+    else:
+        resolved = 7860
+    if not 1 <= resolved <= 65_535:
+        raise typer.BadParameter("port must be between 1 and 65535", param_hint="port")
+    return resolved
+
+
+def _hosted_configuration() -> HostedRuntimeConfiguration:
+    os.environ["KASSETTE_RUNTIME_MODE"] = "hosted"
+    try:
+        settings = load_settings()
+        return HostedRuntimeConfiguration.from_settings(settings)
+    except ValidationError as error:
+        fields = {str(item["loc"][0]) for item in error.errors() if item.get("loc")}
+        if "KASSETTE_SERVICE_SECRET" in fields or "service_secret" in fields:
+            message = "KASSETTE_SERVICE_SECRET must contain at least 32 characters"
+        else:
+            message = "hosted configuration is invalid"
+        raise typer.BadParameter(message, param_hint="hosted") from error
+    except HostedConfigurationError as error:
+        raise typer.BadParameter(str(error), param_hint="hosted") from error
 
 
 @app.command()

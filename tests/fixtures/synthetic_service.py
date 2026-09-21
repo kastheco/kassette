@@ -14,9 +14,11 @@ from kassette.credentials import CodexCredentials
 from kassette.domain import AudioChunk
 from kassette.providers.quicksilver.protocol import ProviderEvent
 from kassette.sessions import LiveSessionCoordinator, SessionRegistry
+from kassette.settings import load_settings
 
-registry = SessionRegistry()
-lifecycle = LiveSessionCoordinator()
+settings = load_settings()
+registry = SessionRegistry(lease_policy=settings.audio_lease_policy)
+lifecycle = LiveSessionCoordinator(policy=settings.session_concurrency_policy)
 opened: list[str] = []
 closed: list[str] = []
 
@@ -60,13 +62,18 @@ class SyntheticProvider:
 async def test_state() -> dict[str, object]:
     sessions = await registry.list()
     active = await lifecycle.active()
+    active_handles = await lifecycle.active_handles()
     return {
         "sessions": [
             {"id": session.id, "state": session.state.value, "generation": session.generation}
             for session in sessions
         ],
         "audio_owner": await registry.audio_owner(),
+        "audio_owners": [owner.id for owner in await registry.audio_owners()],
         "active": active.id if active is not None else None,
+        "active_handles": [
+            {"id": handle.id, "generation": handle.generation} for handle in active_handles
+        ],
         "opened": opened,
         "closed": closed,
     }
@@ -93,10 +100,24 @@ async def bot(runner_args: RunnerArguments) -> None:
         lifecycle=lifecycle,
         credential_provider=SyntheticCredentials(),
         provider_transport_factory=SyntheticProvider,
+        replace_existing=settings.hosted,
     )
 
 
 if __name__ == "__main__":
+    import pipecat.runner.run as pipecat_runner
     from pipecat.runner.run import main
+
+    if settings.hosted:
+        from kassette.hosted import HostedRuntimeConfiguration, install_hosted_runtime
+
+        configuration = HostedRuntimeConfiguration.from_settings(settings)
+        original_configure_server_app = pipecat_runner._configure_server_app  # pyright: ignore[reportPrivateUsage]
+
+        def configure_hosted_server(args: Any) -> None:
+            original_configure_server_app(args)
+            install_hosted_runtime(app, configuration, lifecycle.close_all)
+
+        pipecat_runner._configure_server_app = configure_hosted_server  # pyright: ignore[reportPrivateUsage]
 
     main()

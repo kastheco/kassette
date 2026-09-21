@@ -5,8 +5,10 @@ import pytest
 from kassette.domain import SessionState
 from kassette.sessions import (
     AudioDeviceBusyError,
+    AudioLeasePolicy,
     InvalidSessionTransitionError,
     LiveSessionCoordinator,
+    SessionConcurrencyPolicy,
     SessionGenerationMismatchError,
     SessionHandle,
     SessionRegistry,
@@ -25,6 +27,20 @@ async def test_registry_tracks_independent_sessions_and_one_audio_lease() -> Non
         await registry.acquire_audio(second.id)
 
     assert await registry.audio_owner() == first.id
+
+
+async def test_hosted_sessions_hold_independent_session_scoped_leases() -> None:
+    registry = SessionRegistry(lease_policy=AudioLeasePolicy.SESSION)
+    first = await registry.create("first")
+    second = await registry.create("second")
+
+    await registry.acquire_audio(first.id, expected_generation=first.generation)
+    await registry.acquire_audio(second.id, expected_generation=second.generation)
+
+    assert set(await registry.audio_owners()) == {
+        SessionHandle("first", first.generation),
+        SessionHandle("second", second.generation),
+    }
 
 
 async def test_terminal_transition_releases_audio_lease() -> None:
@@ -82,6 +98,52 @@ async def test_reconnect_closes_previous_session_and_stale_clear_is_ignored() ->
     assert await coordinator.active() == second
 
 
+async def test_hosted_reconnect_replaces_only_the_same_logical_session() -> None:
+    coordinator = LiveSessionCoordinator(policy=SessionConcurrencyPolicy.SESSION)
+    closed: list[str] = []
+    first_a = SessionHandle("a", 1)
+    first_b = SessionHandle("b", 2)
+    second_a = SessionHandle("a", 3)
+
+    async def close_first_a() -> None:
+        closed.append("a-1")
+
+    async def close_first_b() -> None:
+        closed.append("b-2")
+
+    async def close_second_a() -> None:
+        closed.append("a-3")
+
+    await coordinator.replace(first_a, close_first_a)
+    await coordinator.replace(first_b, close_first_b)
+    await coordinator.replace(second_a, close_second_a)
+    await coordinator.clear(first_a)
+
+    assert closed == ["a-1"]
+    assert await coordinator.active("a") == second_a
+    assert await coordinator.active("b") == first_b
+
+
+async def test_hosted_stale_generation_cannot_release_or_reap_replacement() -> None:
+    registry = SessionRegistry(lease_policy=AudioLeasePolicy.SESSION)
+    first = await registry.create("voice")
+    await registry.acquire_audio("voice", expected_generation=first.generation)
+
+    second = await registry.create("voice", replace_existing=True)
+    await registry.acquire_audio("voice", expected_generation=second.generation)
+    await registry.release_audio("voice", expected_generation=first.generation)
+
+    with pytest.raises(SessionGenerationMismatchError):
+        await registry.transition(
+            "voice",
+            SessionState.FAILED,
+            expected_generation=first.generation,
+        )
+
+    assert await registry.get("voice") == second
+    assert await registry.audio_owners() == (SessionHandle("voice", second.generation),)
+
+
 async def test_reconnect_starts_replacement_when_previous_cleanup_fails() -> None:
     coordinator = LiveSessionCoordinator()
     first = SessionHandle("first", 1)
@@ -121,6 +183,36 @@ async def test_overlapping_replacements_are_serialized() -> None:
     await coordinator.replace(first, close_first)
     replace_second = asyncio.create_task(coordinator.replace(second, close_session))
     await first_close_started.wait()
+    replace_third = asyncio.create_task(coordinator.replace(third, close_session))
+    await asyncio.sleep(0)
+
+    assert not replace_third.done()
+
+    release_first_close.set()
+    assert await replace_second
+    assert await replace_third
+    assert await coordinator.active() == third
+
+
+async def test_clear_keeps_replacements_for_the_same_scope_serialized() -> None:
+    coordinator = LiveSessionCoordinator()
+    first = SessionHandle("first", 1)
+    second = SessionHandle("second", 1)
+    third = SessionHandle("third", 1)
+    first_close_started = asyncio.Event()
+    release_first_close = asyncio.Event()
+
+    async def close_first() -> None:
+        first_close_started.set()
+        await release_first_close.wait()
+
+    async def close_session() -> None:
+        return
+
+    await coordinator.replace(first, close_first)
+    replace_second = asyncio.create_task(coordinator.replace(second, close_session))
+    await first_close_started.wait()
+    await coordinator.clear(first)
     replace_third = asyncio.create_task(coordinator.replace(third, close_session))
     await asyncio.sleep(0)
 
