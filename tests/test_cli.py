@@ -65,6 +65,55 @@ def test_serve_rejects_non_loopback_host() -> None:
     assert "only permits loopback" in result.output
 
 
+def test_hosted_serve_uses_railway_port_and_non_loopback_bind(monkeypatch: MonkeyPatch) -> None:
+    called_argv: list[str] = []
+
+    def fake_execv(_path: str, argv: list[str]) -> None:
+        called_argv.extend(argv)
+
+    monkeypatch.setattr(os, "execv", fake_execv)
+    monkeypatch.setenv("PORT", "8123")
+    monkeypatch.setenv("KASSETTE_SERVICE_SECRET", "s" * 32)
+    monkeypatch.setenv(
+        "KASSETTE_ICE_SERVERS",
+        '[{"urls":"turns:relay.example:443","username":"tower","credential":"hidden"}]',
+    )
+
+    result = runner.invoke(app, ["serve", "--hosted"])
+
+    assert result.exit_code == 0
+    assert "hosted mode on http://0.0.0.0:8123" in result.stdout
+    assert called_argv[called_argv.index("--host") + 1] == "0.0.0.0"
+    assert called_argv[called_argv.index("--port") + 1] == "8123"
+    assert "hidden" not in " ".join(called_argv)
+
+
+def test_hosted_serve_fails_without_service_secret(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setenv("PORT", "8123")
+    monkeypatch.delenv("KASSETTE_SERVICE_SECRET", raising=False)
+    monkeypatch.setenv(
+        "KASSETTE_ICE_SERVERS",
+        '[{"urls":"turns:relay.example:443","username":"tower","credential":"hidden"}]',
+    )
+
+    result = runner.invoke(app, ["serve", "--hosted"])
+
+    assert result.exit_code == 2
+    assert "KASSETTE_SERVICE_SECRET" in result.output
+    assert "hidden" not in result.output
+
+
+def test_hosted_serve_fails_without_turn_relay(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setenv("PORT", "8123")
+    monkeypatch.setenv("KASSETTE_SERVICE_SECRET", "s" * 32)
+    monkeypatch.setenv("KASSETTE_ICE_SERVERS", '[{"urls":"stun:stun.example:3478"}]')
+
+    result = runner.invoke(app, ["serve", "--hosted"])
+
+    assert result.exit_code == 2
+    assert "KASSETTE_ICE_SERVERS" in result.output
+
+
 def test_serve_rejects_client_origin_with_path() -> None:
     result = runner.invoke(app, ["serve", "--client-origin", "https://clickclack.example/app"])
 

@@ -1,7 +1,7 @@
 [project]
 name = "kassette"
-version = "0.1.0"
-description = "Local realtime voice infrastructure built on Pipecat."
+version = "0.2.0"
+description = "Local and hosted realtime voice infrastructure built on Pipecat."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [

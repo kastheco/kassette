@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
+from enum import StrEnum
 from uuid import uuid4
 
 from kassette.domain import TERMINAL_SESSION_STATES, SessionState, VoiceSessionSnapshot
@@ -36,6 +37,20 @@ class SessionHandle:
     generation: int
 
 
+class AudioLeasePolicy(StrEnum):
+    """Choose whether audio ownership is process-wide or session-scoped."""
+
+    PROCESS = "process"
+    SESSION = "session"
+
+
+class SessionConcurrencyPolicy(StrEnum):
+    """Choose whether reconnect replacement is process-wide or per session ID."""
+
+    PROCESS = "process"
+    SESSION = "session"
+
+
 CloseSession = Callable[[], Awaitable[None]]
 RunSession = Callable[[], Awaitable[None]]
 _MAX_SESSION_ID_CHARS = 96
@@ -48,18 +63,39 @@ class _ActiveSession:
 
 
 class LiveSessionCoordinator:
-    """Serialize replacement of the one localhost voice loop."""
+    """Fence reconnect replacement at the configured runtime scope."""
 
-    def __init__(self) -> None:
-        self._replacement_lock = asyncio.Lock()
+    _PROCESS_SCOPE = "__process__"
+
+    def __init__(
+        self,
+        policy: SessionConcurrencyPolicy = SessionConcurrencyPolicy.PROCESS,
+    ) -> None:
+        self._policy = policy
         self._lock = asyncio.Lock()
-        self._active: _ActiveSession | None = None
+        self._replacement_locks: dict[str, asyncio.Lock] = {}
+        self._active: dict[str, _ActiveSession] = {}
+
+    @property
+    def policy(self) -> SessionConcurrencyPolicy:
+        return self._policy
+
+    def _scope(self, handle: SessionHandle) -> str:
+        if self._policy is SessionConcurrencyPolicy.PROCESS:
+            return self._PROCESS_SCOPE
+        return handle.id
+
+    async def _replacement_lock(self, scope: str) -> asyncio.Lock:
+        async with self._lock:
+            return self._replacement_locks.setdefault(scope, asyncio.Lock())
 
     async def replace(self, handle: SessionHandle, close: CloseSession) -> bool:
+        scope = self._scope(handle)
+        replacement_lock = await self._replacement_lock(scope)
         previous_closed = True
-        async with self._replacement_lock:
+        async with replacement_lock:
             async with self._lock:
-                previous = self._active
+                previous = self._active.get(scope)
             if previous is not None and previous.handle != handle:
                 try:
                     await previous.close()
@@ -71,13 +107,15 @@ class LiveSessionCoordinator:
                 except Exception:
                     previous_closed = False
             async with self._lock:
-                self._active = _ActiveSession(handle, close)
+                self._active[scope] = _ActiveSession(handle, close)
         return previous_closed
 
     async def run_active(self, handle: SessionHandle, run: RunSession) -> bool:
-        async with self._replacement_lock:
+        scope = self._scope(handle)
+        replacement_lock = await self._replacement_lock(scope)
+        async with replacement_lock:
             async with self._lock:
-                active = self._active
+                active = self._active.get(scope)
                 if active is None or active.handle != handle:
                     return False
 
@@ -99,18 +137,46 @@ class LiveSessionCoordinator:
                         pass
                     await active.close()
 
-                self._active = _ActiveSession(handle, close_started_session)
+                self._active[scope] = _ActiveSession(handle, close_started_session)
         await run_task
         return True
 
     async def clear(self, handle: SessionHandle) -> None:
+        scope = self._scope(handle)
         async with self._lock:
-            if self._active is not None and self._active.handle == handle:
-                self._active = None
+            active = self._active.get(scope)
+            if active is not None and active.handle == handle:
+                self._active.pop(scope, None)
+                self._replacement_locks.pop(scope, None)
 
-    async def active(self) -> SessionHandle | None:
+    async def active(self, session_id: str | None = None) -> SessionHandle | None:
         async with self._lock:
-            return self._active.handle if self._active is not None else None
+            if self._policy is SessionConcurrencyPolicy.PROCESS:
+                active = self._active.get(self._PROCESS_SCOPE)
+                return active.handle if active is not None else None
+            if session_id is not None:
+                active = self._active.get(session_id)
+                return active.handle if active is not None else None
+            if len(self._active) == 1:
+                return next(iter(self._active.values())).handle
+            return None
+
+    async def active_handles(self) -> tuple[SessionHandle, ...]:
+        async with self._lock:
+            return tuple(active.handle for active in self._active.values())
+
+    async def close_all(self) -> None:
+        """Close every current generation during server shutdown."""
+        async with self._lock:
+            active = tuple(self._active.values())
+        if active:
+            await asyncio.gather(*(session.close() for session in active), return_exceptions=True)
+        async with self._lock:
+            for session in active:
+                scope = self._scope(session.handle)
+                if self._active.get(scope) == session:
+                    self._active.pop(scope, None)
+                    self._replacement_locks.pop(scope, None)
 
 
 _ALLOWED_TRANSITIONS: dict[SessionState, frozenset[SessionState]] = {
@@ -165,25 +231,41 @@ _ALLOWED_TRANSITIONS: dict[SessionState, frozenset[SessionState]] = {
 
 
 class SessionRegistry:
-    """Own transient sessions and one exclusive local audio lease."""
+    """Own transient sessions and audio leases at an explicit runtime scope."""
 
-    def __init__(self) -> None:
+    _PROCESS_LEASE = "__process__"
+
+    def __init__(
+        self,
+        lease_policy: AudioLeasePolicy = AudioLeasePolicy.PROCESS,
+    ) -> None:
+        self._lease_policy = lease_policy
         self._lock = asyncio.Lock()
         self._sessions: dict[str, VoiceSessionSnapshot] = {}
         self._next_generation = 0
-        self._audio_owner: SessionHandle | None = None
+        self._audio_owners: dict[str, SessionHandle] = {}
+
+    @property
+    def lease_policy(self) -> AudioLeasePolicy:
+        return self._lease_policy
+
+    def _lease_scope(self, session_id: str) -> str:
+        if self._lease_policy is AudioLeasePolicy.PROCESS:
+            return self._PROCESS_LEASE
+        return session_id
 
     async def create(
         self,
         session_id: str | None = None,
         *,
         initial_provider_id: str | None = None,
+        replace_existing: bool = False,
     ) -> VoiceSessionSnapshot:
         resolved_id = session_id or str(uuid4())
         if len(resolved_id) > _MAX_SESSION_ID_CHARS or not resolved_id.isprintable():
             raise SessionRegistryError("invalid voice session identifier")
         async with self._lock:
-            if resolved_id in self._sessions:
+            if resolved_id in self._sessions and not replace_existing:
                 raise SessionRegistryError("voice session already exists")
             self._next_generation += 1
             generation = self._next_generation
@@ -318,10 +400,11 @@ class SessionRegistry:
                 error_code=error_code,
             )
             self._sessions[session_id] = next_session
-            if state in TERMINAL_SESSION_STATES and self._audio_owner == SessionHandle(
-                session_id, current.generation
-            ):
-                self._audio_owner = None
+            lease_scope = self._lease_scope(session_id)
+            if state in TERMINAL_SESSION_STATES and self._audio_owners.get(
+                lease_scope
+            ) == SessionHandle(session_id, current.generation):
+                self._audio_owners.pop(lease_scope, None)
             return next_session
 
     async def acquire_audio(
@@ -333,28 +416,39 @@ class SessionRegistry:
             if session.state in TERMINAL_SESSION_STATES:
                 raise SessionRegistryError("a terminal voice session cannot acquire audio")
             handle = SessionHandle(session_id, session.generation)
-            owner = self._audio_owner
+            lease_scope = self._lease_scope(session_id)
+            owner = self._audio_owners.get(lease_scope)
             if owner is not None and owner != handle:
-                raise AudioDeviceBusyError("local audio is already leased by another voice session")
-            self._audio_owner = handle
+                same_hosted_session = (
+                    self._lease_policy is AudioLeasePolicy.SESSION and owner.id == session_id
+                )
+                if not same_hosted_session:
+                    raise AudioDeviceBusyError(
+                        "local audio is already leased by another voice session"
+                    )
+            self._audio_owners[lease_scope] = handle
 
     async def release_audio(
         self, session_id: str, *, expected_generation: int | None = None
     ) -> None:
         async with self._lock:
-            if self._audio_owner is None or self._audio_owner.id != session_id:
+            lease_scope = self._lease_scope(session_id)
+            owner = self._audio_owners.get(lease_scope)
+            if owner is None or owner.id != session_id:
                 return
-            if (
-                expected_generation is not None
-                and self._audio_owner.generation != expected_generation
-            ):
+            if expected_generation is not None and owner.generation != expected_generation:
                 return
-            if self._audio_owner.id == session_id:
-                self._audio_owner = None
+            self._audio_owners.pop(lease_scope, None)
 
     async def audio_owner(self) -> str | None:
         async with self._lock:
-            return self._audio_owner.id if self._audio_owner is not None else None
+            if len(self._audio_owners) != 1:
+                return None
+            return next(iter(self._audio_owners.values())).id
+
+    async def audio_owners(self) -> tuple[SessionHandle, ...]:
+        async with self._lock:
+            return tuple(self._audio_owners.values())
 
     async def reap(self, session_id: str, *, expected_generation: int | None = None) -> None:
         async with self._lock:
@@ -363,8 +457,9 @@ class SessionRegistry:
             if session.state not in TERMINAL_SESSION_STATES:
                 raise SessionRegistryError("only terminal voice sessions can be reaped")
             self._sessions.pop(session_id)
-            if self._audio_owner == SessionHandle(session_id, session.generation):
-                self._audio_owner = None
+            lease_scope = self._lease_scope(session_id)
+            if self._audio_owners.get(lease_scope) == SessionHandle(session_id, session.generation):
+                self._audio_owners.pop(lease_scope, None)
 
     def _require(self, session_id: str) -> VoiceSessionSnapshot:
         try:

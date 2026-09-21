@@ -5,13 +5,13 @@
     </td>
     <td>
       <h1>kassette</h1>
-      <p><strong>local realtime voice for pi, clickclack, and openclaw.</strong></p>
+      <p><strong>local and hosted realtime voice for pi, clickclack, openclaw, and private product backends.</strong></p>
       <p><a href="https://github.com/kastheco/kassette/actions/workflows/ci.yml"><img src="https://github.com/kastheco/kassette/actions/workflows/ci.yml/badge.svg" alt="ci"></a></p>
     </td>
   </tr>
 </table>
 
-kassette is a local realtime voice service built on pipecat. it owns the live audio path and short-lived voice sessions while products and agent runtimes keep their own conversations.
+kassette is a realtime voice service built on pipecat. local mode owns one machine's audio devices for clickclack and pi. hosted mode runs authenticated, concurrent webrtc sessions behind a trusted product backend. products and agent runtimes keep their own durable conversations in both modes.
 
 the default path is a cascade. gemini 3.5 transcribe live produces provisional and final transcripts, then fish audio speaks the response returned by the active client. the cascade can use openai's low-latency `gpt-live-transcribe` model instead. quicksilver gpt-live is the second runtime-selectable adapter. clickclack delegates each spoken request through its active openclaw conversation, while pi delegates through its current terminal session. both return the agent's answer to quicksilver for native speech.
 
@@ -21,7 +21,7 @@ the original local voice-gateway scope is in daily use through the clickclack el
 
 the repository also includes `pi-kassette`, a linux terminal voice client for pi. pi keeps its normal conversation and reasoning. kassette owns the short-lived voice session and local devices.
 
-## development
+## local mode
 
 ```bash
 uv sync
@@ -34,9 +34,66 @@ uv run kassette call
 
 the local `.env` file is gitignored. `GOOGLE_API_KEY` authenticates `gemini-3.5-transcribe-live`; `FISH_API_KEY` authenticates fish audio `s2.1-pro`. `FISH_VOICE_ID` is optional. to use gpt transcription in cascade mode, set `KASSETTE_TRANSCRIPTION_PROVIDER=openai` and `OPENAI_API_KEY`. the default openai model is `gpt-live-transcribe`, configurable through `KASSETTE_OPENAI_TRANSCRIPTION_MODEL`. set `KASSETTE_VOICE_BACKEND=quicksilver` to use the codex-authenticated native voice adapter, or `KASSETTE_VOICE_BACKEND=gemini-live` for delegated Gemini native audio. Gemini Live defaults to `gemini-3.8-live`; set `KASSETTE_GEMINI_LIVE_MODEL=gemini-3.8-live-extended-thinking` to use extended thinking. Both Gemini paths delegate substantive answers to the active Pi or OpenClaw client.
 
-the service only binds to a loopback address. both `serve` and `call` reject non-loopback hosts. browser origins are separate: `--client-origin` allowlists exact additional http(s) origins, including non-loopback origins, so a trusted remote client can reach the loopback listener through an existing private network path. origins with credentials, a path, a query, or a fragment are rejected.
+local mode binds to `127.0.0.1:7860` by default. both `serve` and `call` continue to reject non-loopback hosts unless `serve` receives the explicit `--hosted` option. browser origins are separate: `--client-origin` allowlists exact additional http(s) origins. origins with credentials, a path, a query, or a fragment are rejected.
 
 message playback uses `POST /api/tts` on the same local service. the endpoint accepts `{ "text": "..." }`, returns mono 24 khz wav audio, and keeps a small process-local content cache. product clients should keep their own refresh-scoped audio cache so replay doesn't call the provider again.
+
+## hosted mode
+
+hosted mode is an explicit server contract for a private backend deployment. it binds to `0.0.0.0` and reads Railway's `PORT`:
+
+```bash
+export PORT=7860
+export KASSETTE_SERVICE_SECRET="$(openssl rand -hex 32)"
+export KASSETTE_ICE_SERVERS='[{"urls":"turns:turn.example.net:443?transport=tcp","username":"...","credential":"..."}]'
+uv run kassette serve --hosted
+```
+
+`KASSETTE_SERVICE_SECRET` must contain at least 32 characters. send it as `Authorization: Bearer <secret>` on `POST /start`, `POST` and `PATCH /api/offer`, and session-scoped signaling under `/sessions/{session_id}/...`. hosted mode authenticates every route except `GET /healthz`, which returns a fixed bounded response for Railway health checks. missing or invalid hosted auth returns a bounded `401` response.
+
+Tower is the trust seam for the planned deployment. Tower authenticates users on its HTTPS origin, proxies signaling over Railway private networking, and adds the Kassette service secret server-side. the browser never receives that secret and never connects to Kassette's HTTP listener directly. Kassette authenticates Tower, not end users.
+
+media does not follow the private HTTP path. the browser and Kassette negotiate WebRTC through managed TURN. use authenticated `turns:` on port 443, usually TCP/TLS, and treat host or server-reflexive candidates as optional. do not assign Kassette a public Railway domain or assume that a Railway container has a stable public ICE address. Kassette consumes managed TURN; it does not build or operate a TURN server.
+
+Pipecat receives the validated ICE configuration through its supported `PIPECAT_ICE_SERVERS` surface. Kassette passes the same ICE servers to the authorized signaling client and to its own peer connection. TURN credentials and service credentials are excluded from argv, startup output, validation errors, and lifecycle logs.
+
+hosted sessions use one replacement slot and one media lease per logical session ID. distinct IDs run concurrently. reconnecting one ID replaces only its previous generation, and stale callbacks cannot close or release the newer generation. local and terminal audio retain the process-wide hardware lease.
+
+build and run the production image with:
+
+```bash
+podman build --tag kassette:0.2.0 .
+podman run --rm \
+  --env PORT=7860 \
+  --env KASSETTE_SERVICE_SECRET \
+  --env KASSETTE_ICE_SERVERS \
+  --publish 127.0.0.1:7860:7860 \
+  kassette:0.2.0
+```
+
+the image installs from `uv.lock`, runs as the non-root `kassette` user, starts with `kassette serve --hosted`, exposes the default application port, and shuts down active session workers and WebRTC connections on termination.
+
+### environment contract
+
+| variable | mode | requirement | purpose |
+| --- | --- | --- | --- |
+| `PORT` | hosted | required unless `--port` is passed | application port supplied by Railway |
+| `KASSETTE_SERVICE_SECRET` | hosted | required, at least 32 characters | dedicated Tower-to-Kassette bearer secret |
+| `KASSETTE_ICE_SERVERS` | hosted | required | JSON ICE server array with at least one authenticated `turn:` or `turns:` relay |
+| `KASSETTE_VOICE_BACKEND` | both | optional, defaults to `cascade` | selects `cascade`, `quicksilver`, or `gemini-live` |
+| `GOOGLE_API_KEY` | both | required for Gemini transcription | provider credential, never used as service auth |
+| `OPENAI_API_KEY` | both | required when cascade transcription uses OpenAI | provider credential, never used as service auth |
+| `FISH_API_KEY` | both | required for Fish Audio TTS | provider credential, never used as service auth |
+| `FISH_MODEL`, `FISH_VOICE_ID` | both | optional | Fish Audio model and voice selection |
+| `KASSETTE_TRANSCRIPTION_PROVIDER` | both | optional, defaults to `gemini` | selects cascade STT provider |
+| `KASSETTE_OPENAI_TRANSCRIPTION_MODEL` | both | optional | OpenAI transcription model |
+| `KASSETTE_GEMINI_LIVE_MODEL`, `KASSETTE_GEMINI_LIVE_THINKING_LEVEL` | both | optional | delegated Gemini Live configuration |
+| `KASSETTE_VAD_STOP_SECS`, `KASSETTE_VAD_MIN_VOLUME` | both | optional | voice activity thresholds |
+| `KASSETTE_TRANSCRIPT_GROOMING_PROFILE`, `KASSETTE_TRANSCRIPT_GROOMING_TIMEOUT_SECS` | both | optional | external transcript grooming profile and timeout |
+| `KASSETTE_INPUT_DEVICE_NAME`, `KASSETTE_OUTPUT_DEVICE_NAME` | local | optional | stable terminal audio device names |
+| `KASSETTE_INPUT_DEVICE_INDEX`, `KASSETTE_OUTPUT_DEVICE_INDEX` | local | optional | numeric terminal audio device fallbacks |
+| `KASSETTE_TRANSCRIPTION_API_TOKEN` | both | optional, required for batch transcription | separate bearer token for `/v1/audio/transcriptions` |
+| `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID` | tooling | optional | only used by `scripts/compare_tts.py` |
 
 ### Screenpipe batch transcription
 
@@ -133,8 +190,12 @@ implemented:
 
 - python 3.12 and pipecat 1.8.0
 - clickclack electron and openclaw integration through clickclack's normal message path
-- identified transient voice sessions with one local audio lease
-- loopback-bound smallwebrtc listener with an explicit browser-origin allowlist
+- identified transient voice sessions with an explicit process or session lease policy
+- loopback-bound local smallwebrtc with an explicit browser-origin allowlist
+- authenticated hosted smallwebrtc on `0.0.0.0:$PORT`
+- concurrent hosted session IDs with generation-fenced reconnect replacement
+- managed STUN/TURN configuration through Pipecat's supported ICE surface
+- non-root locked container packaging and bounded `/healthz`
 - loopback terminal sessions with service-owned local audio and the pi voice surface
 - selectable gemini 3.5 transcribe live or openai gpt live transcribe stt
 - provider-neutral provisional and final transcript events
@@ -149,7 +210,8 @@ implemented:
 intentionally outside kassette's scope:
 
 - durable conversation or product state
-- remote ingress, tls, or turn
+- public ingress or TLS termination
+- TURN server implementation or operation
 - mobile and background-audio clients
 - a separate system-wide desktop overlay or target router
 - orca and orkastrator bridges

@@ -49,6 +49,38 @@ jobs:
       - name: Run Pyright
         run: uv run pyright
 
+  container:
+    name: hosted container smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: check out repository
+        uses: actions/checkout@v4
+
+      - name: build locked image
+        run: docker build --tag kassette:ci .
+
+      - name: start hosted image and check health
+        shell: bash
+        run: |
+          set -euo pipefail
+          trap 'docker rm --force kassette-ci >/dev/null 2>&1 || true' EXIT
+          docker run --detach --name kassette-ci \
+            --env PORT=7860 \
+            --env KASSETTE_SERVICE_SECRET=ci-service-secret-value-1234567890 \
+            --env 'KASSETTE_ICE_SERVERS=[{"urls":"turns:relay.example:443","username":"ci","credential":"test-only"}]' \
+            --publish 127.0.0.1:7860:7860 \
+            kassette:ci
+          for attempt in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:7860/healthz >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs kassette-ci
+          exit 1
+
   pi-extension:
     name: Pi extension checks
     runs-on: ubuntu-latest
