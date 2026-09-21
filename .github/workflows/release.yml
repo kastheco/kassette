@@ -10,6 +10,12 @@ on:
       - uv.lock
       - CHANGELOG.md
   workflow_dispatch:
+    inputs:
+      recover_existing_release:
+        description: recover a tagged release without republishing its container
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -28,15 +34,16 @@ jobs:
       minor: ${{ steps.release.outputs.minor }}
       tag: ${{ steps.release.outputs.tag }}
       tag_exists: ${{ steps.release.outputs.tag_exists }}
+      should_recover: ${{ steps.release.outputs.should_recover }}
 
     steps:
       - name: check out merge commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
 
       - name: install Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
 
@@ -45,6 +52,8 @@ jobs:
         shell: bash
         env:
           BEFORE_SHA: ${{ github.event.before }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RECOVER_EXISTING_RELEASE: ${{ inputs.recover_existing_release }}
         run: |
           set -euo pipefail
           version=$(python -c 'import pathlib,tomllib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')
@@ -82,23 +91,64 @@ jobs:
           minor=${version%.*}
           tag="v${version}"
           {
-            echo "should_release=true"
             echo "version=${version}"
             echo "minor=${minor}"
             echo "tag=${tag}"
           } >> "$GITHUB_OUTPUT"
 
           git fetch --force --tags origin
-          if git rev-parse --verify --quiet "refs/tags/${tag}" >/dev/null; then
-            tagged_sha=$(git rev-list -n 1 "${tag}")
-            if [ "${tagged_sha}" != "${GITHUB_SHA}" ]; then
-              echo "${tag} already points to ${tagged_sha}, not ${GITHUB_SHA}" >&2
-              exit 1
-            fi
-            echo "tag_exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "tag_exists=false" >> "$GITHUB_OUTPUT"
+          if ! git rev-parse --verify --quiet "refs/tags/${tag}" >/dev/null; then
+            {
+              echo "should_release=true"
+              echo "should_recover=false"
+              echo "tag_exists=false"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+
+          tagged_sha=$(git rev-list -n 1 "${tag}")
+          if [ "${tagged_sha}" != "${GITHUB_SHA}" ]; then
+            echo "${tag} already points to ${tagged_sha}, not ${GITHUB_SHA}" >&2
+            exit 1
+          fi
+
+          wheel="kassette-${version}-py3-none-any.whl"
+          sdist="kassette-${version}.tar.gz"
+          release_complete=false
+          if release_body=$(gh release view "$tag" --json body --jq .body 2>/dev/null) && \
+             asset_names=$(gh release view "$tag" --json assets --jq '.assets[].name' 2>/dev/null) && \
+             printf '%s\n' "$asset_names" | grep --fixed-strings --line-regexp --quiet "$wheel" && \
+             printf '%s\n' "$asset_names" | grep --fixed-strings --line-regexp --quiet "$sdist" && \
+             printf '%s\n' "$release_body" | grep '^Digest:' | grep --extended-regexp --quiet 'sha256:[0-9a-f]{64}'; then
+            release_complete=true
+          fi
+
+          if [ "$release_complete" = true ] && [ "$RECOVER_EXISTING_RELEASE" != true ]; then
+            echo "${tag} already has its release assets and recorded image digest; nothing to publish"
+            {
+              echo "should_release=false"
+              echo "should_recover=false"
+              echo "tag_exists=true"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "$RECOVER_EXISTING_RELEASE" != true ]; then
+            echo "${tag} is incomplete; skipping automatic publishing"
+            echo "run workflow_dispatch with recover_existing_release=true to restore missing release assets"
+            {
+              echo "should_release=false"
+              echo "should_recover=false"
+              echo "tag_exists=true"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          {
+            echo "should_release=false"
+            echo "should_recover=true"
+            echo "tag_exists=true"
+          } >> "$GITHUB_OUTPUT"
 
   publish:
     name: build and publish release
@@ -114,22 +164,22 @@ jobs:
 
     steps:
       - name: check out merge commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
 
       - name: install uv
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
         with:
           enable-cache: true
 
       - name: install Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
 
       - name: install Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22"
           cache: npm
@@ -178,10 +228,10 @@ jobs:
         run: uv build
 
       - name: set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
       - name: sign in to GitHub Container Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -189,7 +239,7 @@ jobs:
 
       - name: derive container metadata
         id: container
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
@@ -205,7 +255,7 @@ jobs:
 
       - name: build and publish container
         id: image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           push: true
@@ -218,7 +268,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: attest published container
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
           subject-name: ghcr.io/${{ github.repository }}
           subject-digest: ${{ steps.image.outputs.digest }}
@@ -244,12 +294,105 @@ jobs:
         run: |
           printf "\n## container\n\n\`ghcr.io/%s:%s\`\n\nDigest: \`%s\`\n" \
             "$GITHUB_REPOSITORY" "$VERSION" "$IMAGE_DIGEST" >> release-notes.md
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" dist/* --clobber
-          else
-            gh release create "$TAG" \
-              --verify-tag \
-              --title "kassette ${VERSION}" \
-              --notes-file release-notes.md \
-              dist/*
+          gh release create "$TAG" \
+            --verify-tag \
+            --title "kassette ${VERSION}" \
+            --notes-file release-notes.md \
+            dist/*
+
+  recover:
+    name: recover incomplete release
+    needs: prepare
+    if: needs.prepare.outputs.should_recover == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      packages: read
+
+    steps:
+      - name: check out tagged commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - name: install uv
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+
+      - name: install Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - name: rebuild Python release assets
+        run: uv build
+
+      - name: set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: sign in to GitHub Container Registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: resolve existing container digest
+        id: image
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY}:${VERSION}"
+          digest=$(docker buildx imagetools inspect "$image" | awk '$1 == "Digest:" { print $2; exit }')
+          if ! printf '%s\n' "$digest" | grep --extended-regexp --line-regexp --quiet 'sha256:[0-9a-f]{64}'; then
+            echo "could not resolve the existing ${image} digest" >&2
+            exit 1
           fi
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+
+      - name: restore missing release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            release_body=$(gh release view "$TAG" --json body --jq .body)
+            recorded_digest=$(printf '%s\n' "$release_body" | grep '^Digest:' | grep --extended-regexp --only-matching 'sha256:[0-9a-f]{64}' | head -n 1 || true)
+            if [ -z "$recorded_digest" ] || [ "$recorded_digest" != "$IMAGE_DIGEST" ]; then
+              echo "existing release digest is missing or differs from ${IMAGE_DIGEST}; refusing to alter it" >&2
+              exit 1
+            fi
+            asset_names=$(gh release view "$TAG" --json assets --jq '.assets[].name')
+            for asset in dist/*; do
+              name=${asset##*/}
+              if printf '%s\n' "$asset_names" | grep --fixed-strings --line-regexp --quiet "$name"; then
+                echo "reusing existing ${name}"
+              else
+                gh release upload "$TAG" "$asset"
+              fi
+            done
+            exit 0
+          fi
+
+          python <<'PY'
+          import os
+          import pathlib
+
+          version = os.environ["VERSION"]
+          changelog = pathlib.Path("CHANGELOG.md").read_text()
+          marker = f"## {version}\n"
+          start = changelog.index(marker) + len(marker)
+          remainder = changelog[start:]
+          end = remainder.find("\n## ")
+          notes = remainder if end < 0 else remainder[:end]
+          pathlib.Path("release-notes.md").write_text(notes.strip() + "\n")
+          PY
+          printf "\n## container\n\n\`ghcr.io/%s:%s\`\n\nDigest: \`%s\`\n" \
+            "$GITHUB_REPOSITORY" "$VERSION" "$IMAGE_DIGEST" >> release-notes.md
+          gh release create "$TAG" \
+            --verify-tag \
+            --title "kassette ${VERSION}" \
+            --notes-file release-notes.md \
+            dist/*
