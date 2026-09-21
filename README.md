@@ -73,6 +73,22 @@ podman run --rm \
 
 the image installs from `uv.lock`, runs as the non-root `kassette` user, starts with `kassette serve --hosted`, exposes the default application port, and shuts down active session workers and WebRTC connections on termination.
 
+### releases and Railway deployment
+
+merging a version change to `main` runs [the release workflow](.github/workflows/release.yml). it verifies `pyproject.toml`, `kassette.__version__`, `uv.lock`, and `CHANGELOG.md`; reruns the full Python and Pi checks; builds the wheel and source archive; and publishes the container to GitHub Container Registry. only after those builds pass does it create the annotated `v<version>` tag against the merge commit and create the GitHub release.
+
+release containers use these tags:
+
+- `ghcr.io/kastheco/kassette:0.2.0` for the exact release
+- `ghcr.io/kastheco/kassette:0.2` for the current compatible minor release
+- `ghcr.io/kastheco/kassette:sha-<commit>` for commit-addressed rollback
+
+the release records the immutable image digest and attaches `kassette-<version>-py3-none-any.whl` plus `kassette-<version>.tar.gz`. Kassette is not published to PyPI.
+
+for the first Tower deployment, connect a private Railway service to this repository's `main` branch and select the root `Dockerfile`. Railway builds the same locked image after merge and keeps deployment history for rollback. set `/healthz` as the health-check path, configure the hosted environment variables below, and do not add a public domain. Tower reaches Kassette through Railway private networking.
+
+an image-based Railway service may instead pin `ghcr.io/kastheco/kassette:<version>` or, preferably, the release digest. that gives exact artifact parity with the GitHub release but requires GHCR package access and an explicit image update for each release.
+
 ### environment contract
 
 | variable | mode | requirement | purpose |

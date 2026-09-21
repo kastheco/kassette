@@ -10,6 +10,7 @@
 - concurrent hosted WebRTC sessions with per-session replacement and lease scope
 - bounded unauthenticated `/healthz` contract and clean hosted shutdown
 - locked non-root container packaging for private Railway deployment
+- post-merge GitHub release, Python asset, and GHCR container publishing
 - hosted-runtime ADR, environment contract, topology notes, and two-browser validation steps
 
 ### preserved

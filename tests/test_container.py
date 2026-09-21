@@ -7,6 +7,8 @@ def test_container_runs_hosted_as_non_root_with_healthcheck() -> None:
     assert "python:3.12.13-slim-bookworm" in dockerfile
     assert "uv sync --frozen --no-dev" in dockerfile
     assert "USER kassette" in dockerfile
+    assert 'org.opencontainers.image.version="${KASSETTE_VERSION}"' in dockerfile
+    assert 'org.opencontainers.image.revision="${KASSETTE_REVISION}"' in dockerfile
     assert "EXPOSE 7860" in dockerfile
     assert "/healthz" in dockerfile
     assert 'CMD ["kassette", "serve", "--hosted"]' in dockerfile

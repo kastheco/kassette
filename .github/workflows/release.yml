@@ -1,0 +1,255 @@
+name: release
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - pyproject.toml
+      - src/kassette/__init__.py
+      - uv.lock
+      - CHANGELOG.md
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kassette-release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: verify release metadata
+    runs-on: ubuntu-latest
+    outputs:
+      should_release: ${{ steps.release.outputs.should_release }}
+      version: ${{ steps.release.outputs.version }}
+      minor: ${{ steps.release.outputs.minor }}
+      tag: ${{ steps.release.outputs.tag }}
+      tag_exists: ${{ steps.release.outputs.tag_exists }}
+
+    steps:
+      - name: check out merge commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: resolve and verify release metadata
+        id: release
+        shell: bash
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          version=$(python -c 'import pathlib,tomllib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')
+          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+            previous_version=$(git show "${BEFORE_SHA}:pyproject.toml" | python -c 'import sys,tomllib; print(tomllib.loads(sys.stdin.read())["project"]["version"])')
+            if [ "$version" = "$previous_version" ]; then
+              echo "version ${version} did not change; no release needed"
+              echo "should_release=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+
+          python <<'PY'
+          import pathlib
+          import re
+          import tomllib
+
+          project = tomllib.loads(pathlib.Path("pyproject.toml").read_text())
+          version = project["project"]["version"]
+          init = pathlib.Path("src/kassette/__init__.py").read_text()
+          match = re.search(r'^__version__ = "([^"]+)"$', init, re.MULTILINE)
+          if match is None or match.group(1) != version:
+              raise SystemExit("pyproject.toml and kassette.__version__ disagree")
+          changelog = pathlib.Path("CHANGELOG.md").read_text()
+          if f"## {version}\n" not in changelog:
+              raise SystemExit(f"CHANGELOG.md has no {version} release section")
+          lock = tomllib.loads(pathlib.Path("uv.lock").read_text())
+          locked = [item["version"] for item in lock["package"] if item["name"] == "kassette"]
+          if locked != [version]:
+              raise SystemExit("uv.lock and pyproject.toml disagree")
+          if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version) is None:
+              raise SystemExit("release version must be semantic major.minor.patch")
+          PY
+
+          minor=${version%.*}
+          tag="v${version}"
+          {
+            echo "should_release=true"
+            echo "version=${version}"
+            echo "minor=${minor}"
+            echo "tag=${tag}"
+          } >> "$GITHUB_OUTPUT"
+
+          git fetch --force --tags origin
+          if git rev-parse --verify --quiet "refs/tags/${tag}" >/dev/null; then
+            tagged_sha=$(git rev-list -n 1 "${tag}")
+            if [ "${tagged_sha}" != "${GITHUB_SHA}" ]; then
+              echo "${tag} already points to ${tagged_sha}, not ${GITHUB_SHA}" >&2
+              exit 1
+            fi
+            echo "tag_exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag_exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  publish:
+    name: build and publish release
+    needs: prepare
+    if: needs.prepare.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+      attestations: write
+
+    steps:
+      - name: check out merge commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: packages/pi-kassette/package-lock.json
+
+      - name: extract release notes
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          python <<'PY'
+          import os
+          import pathlib
+
+          version = os.environ["VERSION"]
+          changelog = pathlib.Path("CHANGELOG.md").read_text()
+          marker = f"## {version}\n"
+          start = changelog.index(marker) + len(marker)
+          remainder = changelog[start:]
+          end = remainder.find("\n## ")
+          notes = remainder if end < 0 else remainder[:end]
+          pathlib.Path("release-notes.md").write_text(notes.strip() + "\n")
+          PY
+
+      - name: install system dependencies
+        run: sudo apt-get update && sudo apt-get install --yes portaudio19-dev
+
+      - name: install Python dependencies
+        run: uv sync --locked --dev
+
+      - name: run Python tests and checks
+        run: |
+          uv run pytest
+          uv run ruff check .
+          uv run ruff format --check .
+          uv run pyright
+
+      - name: install pi extension dependencies
+        run: npm ci --prefix packages/pi-kassette
+
+      - name: run pi extension checks
+        run: |
+          npm test --prefix packages/pi-kassette
+          npm run typecheck --prefix packages/pi-kassette
+
+      - name: build Python release assets
+        run: uv build
+
+      - name: set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: sign in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: derive container metadata
+        id: container
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=${{ needs.prepare.outputs.version }}
+            type=raw,value=${{ needs.prepare.outputs.minor }}
+            type=sha,prefix=sha-
+          labels: |
+            org.opencontainers.image.title=kassette
+            org.opencontainers.image.description=local and hosted realtime voice infrastructure
+            org.opencontainers.image.version=${{ needs.prepare.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+
+      - name: build and publish container
+        id: image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.container.outputs.tags }}
+          labels: ${{ steps.container.outputs.labels }}
+          build-args: |
+            KASSETTE_VERSION=${{ needs.prepare.outputs.version }}
+            KASSETTE_REVISION=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: attest published container
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.image.outputs.digest }}
+          push-to-registry: true
+
+      - name: tag merge commit
+        if: needs.prepare.outputs.tag_exists != 'true'
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag --annotate "$TAG" --message "kassette ${VERSION}" "$GITHUB_SHA"
+          git push origin "$TAG"
+
+      - name: create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          printf "\n## container\n\n\`ghcr.io/%s:%s\`\n\nDigest: \`%s\`\n" \
+            "$GITHUB_REPOSITORY" "$VERSION" "$IMAGE_DIGEST" >> release-notes.md
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" \
+              --verify-tag \
+              --title "kassette ${VERSION}" \
+              --notes-file release-notes.md \
+              dist/*
+          fi

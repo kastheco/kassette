@@ -5,14 +5,16 @@
 observed on the `release/0.2.0-hosted-runtime` release branch on 2026-09-21:
 
 ```bash
-uv run ruff format --check .                         # 52 files already formatted
+uv run ruff format --check .                         # 53 files already formatted
 uv run ruff check .                                  # passed
 uv run pyright                                       # 0 errors, 0 warnings, 0 informations
-uv run pytest                                        # 185 passed
+uv run pytest                                        # 188 passed
 npm test --prefix packages/pi-kassette               # 34 passed
 npm run typecheck --prefix packages/pi-kassette      # passed
 uv lock --check                                      # resolved 120 packages
-podman build --tag localhost/kassette:0.2.0 .         # passed
+uv build                                             # wheel and source archive built
+GOTOOLCHAIN=local go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 .github/workflows/release.yml  # passed
+podman build --build-arg KASSETTE_VERSION=0.2.0 --tag localhost/kassette:release-check .                  # passed
 ```
 
 the focused container smoke started `localhost/kassette:0.2.0` with `PORT=7860`, a test service secret, and an authenticated `turns:` relay. it observed `GET /healthz` at HTTP 200 without auth, unauthenticated `POST /start` at HTTP 401, authenticated `POST /start` at HTTP 200, and the configured relay in `iceConfig`. `podman inspect` reported the `kassette` runtime user. graceful stop completed within 10 seconds, and container logs contained neither test secret nor TURN credential.

@@ -21,6 +21,15 @@ RUN uv sync --frozen --no-dev --no-editable
 
 FROM python:3.12.13-slim-bookworm AS runtime
 
+ARG KASSETTE_VERSION=development
+ARG KASSETTE_REVISION=unknown
+
+LABEL org.opencontainers.image.title="kassette" \
+    org.opencontainers.image.description="local and hosted realtime voice infrastructure" \
+    org.opencontainers.image.version="${KASSETTE_VERSION}" \
+    org.opencontainers.image.revision="${KASSETTE_REVISION}" \
+    org.opencontainers.image.source="https://github.com/kastheco/kassette"
+
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PATH="/app/.venv/bin:$PATH"
