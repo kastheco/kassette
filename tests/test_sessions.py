@@ -194,6 +194,36 @@ async def test_overlapping_replacements_are_serialized() -> None:
     assert await coordinator.active() == third
 
 
+async def test_clear_keeps_replacements_for_the_same_scope_serialized() -> None:
+    coordinator = LiveSessionCoordinator()
+    first = SessionHandle("first", 1)
+    second = SessionHandle("second", 1)
+    third = SessionHandle("third", 1)
+    first_close_started = asyncio.Event()
+    release_first_close = asyncio.Event()
+
+    async def close_first() -> None:
+        first_close_started.set()
+        await release_first_close.wait()
+
+    async def close_session() -> None:
+        return
+
+    await coordinator.replace(first, close_first)
+    replace_second = asyncio.create_task(coordinator.replace(second, close_session))
+    await first_close_started.wait()
+    await coordinator.clear(first)
+    replace_third = asyncio.create_task(coordinator.replace(third, close_session))
+    await asyncio.sleep(0)
+
+    assert not replace_third.done()
+
+    release_first_close.set()
+    assert await replace_second
+    assert await replace_third
+    assert await coordinator.active() == third
+
+
 async def test_replacement_propagates_caller_cancellation() -> None:
     coordinator = LiveSessionCoordinator()
     first = SessionHandle("first", 1)

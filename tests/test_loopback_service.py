@@ -174,6 +174,9 @@ async def test_actual_loopback_reconnects_with_fresh_session_and_reaps_prior() -
                 break
             except (aiohttp.ClientError, TimeoutError):
                 if process.returncode is not None or time.monotonic() >= deadline:
+                    if process.returncode is None:
+                        process.terminate()
+                    await asyncio.wait_for(process.wait(), timeout=10)
                     output = (
                         (await process.stdout.read()).decode() if process.stdout is not None else ""
                     )

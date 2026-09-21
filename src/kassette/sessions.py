@@ -147,7 +147,6 @@ class LiveSessionCoordinator:
             active = self._active.get(scope)
             if active is not None and active.handle == handle:
                 self._active.pop(scope, None)
-                self._replacement_locks.pop(scope, None)
 
     async def active(self, session_id: str | None = None) -> SessionHandle | None:
         async with self._lock:
@@ -176,7 +175,6 @@ class LiveSessionCoordinator:
                 scope = self._scope(session.handle)
                 if self._active.get(scope) == session:
                     self._active.pop(scope, None)
-                    self._replacement_locks.pop(scope, None)
 
 
 _ALLOWED_TRANSITIONS: dict[SessionState, frozenset[SessionState]] = {

@@ -72,6 +72,7 @@ def test_hosted_serve_uses_railway_port_and_non_loopback_bind(monkeypatch: Monke
         called_argv.extend(argv)
 
     monkeypatch.setattr(os, "execv", fake_execv)
+    monkeypatch.setenv("KASSETTE_RUNTIME_MODE", "hosted")
     monkeypatch.setenv("PORT", "8123")
     monkeypatch.setenv("KASSETTE_SERVICE_SECRET", "s" * 32)
     monkeypatch.setenv(
@@ -89,6 +90,7 @@ def test_hosted_serve_uses_railway_port_and_non_loopback_bind(monkeypatch: Monke
 
 
 def test_hosted_serve_fails_without_service_secret(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setenv("KASSETTE_RUNTIME_MODE", "hosted")
     monkeypatch.setenv("PORT", "8123")
     monkeypatch.delenv("KASSETTE_SERVICE_SECRET", raising=False)
     monkeypatch.setenv(
@@ -104,6 +106,7 @@ def test_hosted_serve_fails_without_service_secret(monkeypatch: MonkeyPatch) -> 
 
 
 def test_hosted_serve_fails_without_turn_relay(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setenv("KASSETTE_RUNTIME_MODE", "hosted")
     monkeypatch.setenv("PORT", "8123")
     monkeypatch.setenv("KASSETTE_SERVICE_SECRET", "s" * 32)
     monkeypatch.setenv("KASSETTE_ICE_SERVERS", '[{"urls":"stun:stun.example:3478"}]')

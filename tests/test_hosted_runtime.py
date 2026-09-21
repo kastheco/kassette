@@ -49,6 +49,9 @@ def _wait_for_health(process: subprocess.Popen[str], base_url: str) -> None:
         except (URLError, TimeoutError):
             pass
         if process.poll() is not None or time.monotonic() >= deadline:
+            if process.poll() is None:
+                process.terminate()
+            process.wait(timeout=15)
             output = process.stdout.read() if process.stdout is not None else ""
             raise AssertionError(f"hosted service did not start: {output}")
         time.sleep(0.05)
