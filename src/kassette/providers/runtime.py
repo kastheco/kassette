@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from dataclasses import dataclass, replace
 from enum import StrEnum
+from inspect import isawaitable
 from typing import Any, Protocol, cast
 
 from pipecat.frames.frames import (
@@ -124,7 +125,9 @@ class VoiceProviderAdapter(Protocol):
     async def close(self) -> None: ...
 
 
-VoiceProviderFactory = Callable[[VoiceProviderBuildContext], VoiceProviderAdapter]
+VoiceProviderFactory = Callable[
+    [VoiceProviderBuildContext], VoiceProviderAdapter | Awaitable[VoiceProviderAdapter]
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -445,7 +448,9 @@ class VoiceProviderRuntime(FrameProcessor):
             try:
                 await previous_adapter.close()
                 failure_reason = "provider_start_failed"
-                candidate = self._build_adapter(provider_id, switch_snapshot.provider_generation)
+                candidate = await self._build_adapter(
+                    provider_id, switch_snapshot.provider_generation
+                )
                 failed_adapter = candidate
                 await candidate.setup(self._provider_setup)
                 active_snapshot = await self._registry.activate_provider(
@@ -497,7 +502,7 @@ class VoiceProviderRuntime(FrameProcessor):
             await self._fail_session("credentials_unavailable")
             raise RuntimeError("initial voice provider credentials are unavailable")
         try:
-            adapter = self._build_adapter(self._provider_id, self._provider_generation)
+            adapter = await self._build_adapter(self._provider_id, self._provider_generation)
             await adapter.setup(self._provider_setup)
             self._adapter = adapter
             await self._start_adapter(adapter, frame, self._provider_generation)
@@ -539,7 +544,9 @@ class VoiceProviderRuntime(FrameProcessor):
                 self._ready_event = None
                 self._ready_error = None
 
-    def _build_adapter(self, provider_id: str, provider_generation: int) -> VoiceProviderAdapter:
+    async def _build_adapter(
+        self, provider_id: str, provider_generation: int
+    ) -> VoiceProviderAdapter:
         definition = self._providers.resolve(provider_id)
         if definition is None:
             raise RuntimeError("voice provider disappeared from registry")
@@ -554,7 +561,7 @@ class VoiceProviderRuntime(FrameProcessor):
                 provider_generation,
             )
 
-        return definition.factory(
+        adapter = definition.factory(
             VoiceProviderBuildContext(
                 session_id=self._session_id,
                 session_generation=self._session_generation,
@@ -563,6 +570,7 @@ class VoiceProviderRuntime(FrameProcessor):
                 frame_sink=forward,
             )
         )
+        return await adapter if isawaitable(adapter) else adapter
 
     async def _collect_provider_event(
         self,
@@ -699,7 +707,7 @@ class VoiceProviderRuntime(FrameProcessor):
         self._provider_generation = recovery.provider_generation
         await self._publish_state(recovery.state)
         try:
-            adapter = self._build_adapter(previous_provider, recovery.provider_generation)
+            adapter = await self._build_adapter(previous_provider, recovery.provider_generation)
             await adapter.setup(self._provider_setup)
             active_snapshot = await self._registry.activate_provider(
                 self._session_id,

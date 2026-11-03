@@ -22,13 +22,14 @@ from websockets.asyncio.server import Server, ServerConnection, serve
 
 from kassette.aws_credentials import AWSCredentialsUnavailableError, AWSTranscribeCredentials
 from kassette.dictation import DictationError, dictation_credentials
+from kassette.domain import SessionState
 from kassette.providers import aws_transcribe
 from kassette.providers.aws_transcribe import (
     PausableAWSTranscribeSTTService,
     transcribe_stream_url,
 )
 from kassette.providers.builtin import build_builtin_provider_registry, build_cascade_stt
-from kassette.providers.runtime import CredentialReadiness
+from kassette.providers.runtime import CredentialReadiness, VoiceProviderRuntime
 from kassette.sessions import SessionRegistry
 from kassette.settings import KassetteSettings, load_settings
 
@@ -192,6 +193,48 @@ def test_aws_cascade_readiness_waits_for_start_and_still_requires_fish(
     )
     with_fish = _settings(KASSETTE_TRANSCRIPTION_PROVIDER="aws", FISH_API_KEY="fish")
     assert readiness(with_fish) is CredentialReadiness.UNKNOWN
+
+
+async def test_initial_cascade_credentials_leave_the_event_loop_responsive(
+    monkeypatch: pytest.MonkeyPatch, isolated_aws: None
+) -> None:
+    loop = asyncio.get_running_loop()
+    loop_thread = threading.get_ident()
+    resolving = asyncio.Event()
+    release = threading.Event()
+
+    def resolve(_settings: KassetteSettings) -> AWSTranscribeCredentials:
+        assert threading.get_ident() != loop_thread, "credential refresh blocked the event loop"
+        loop.call_soon_threadsafe(resolving.set)
+        assert release.wait(5), "event loop didn't release credential resolution"
+        raise AWSCredentialsUnavailableError("synthetic refresh failure")
+
+    monkeypatch.setattr(KassetteSettings, "aws_transcription_credentials", resolve)
+    sessions = SessionRegistry()
+    snapshot = await sessions.create("aws-start", initial_provider_id="cascade")
+    runtime = VoiceProviderRuntime(
+        session_id="aws-start",
+        session_generation=snapshot.generation,
+        initial_provider_id="cascade",
+        registry=sessions,
+        providers=build_builtin_provider_registry(
+            _settings(KASSETTE_TRANSCRIPTION_PROVIDER="aws", FISH_API_KEY="fish"),
+            session_registry=sessions,
+        ),
+    )
+
+    task = asyncio.create_task(runtime.process_frame(StartFrame(), FrameDirection.DOWNSTREAM))
+    try:
+        await asyncio.wait_for(resolving.wait(), 2)
+        assert not task.done()
+    finally:
+        release.set()
+        try:
+            with pytest.raises(AWSCredentialsUnavailableError, match="synthetic refresh failure"):
+                await task
+            assert (await sessions.get("aws-start")).state is SessionState.FAILED
+        finally:
+            await runtime.cleanup()
 
 
 def test_dictation_rejects_providers_without_a_definitive_end_of_stream() -> None:

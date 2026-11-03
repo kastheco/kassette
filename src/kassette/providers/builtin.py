@@ -199,8 +199,12 @@ def build_builtin_provider_registry(
         else CredentialReadiness.MISSING
     )
 
-    def build_cascade(context: VoiceProviderBuildContext) -> PipelineProviderAdapter:
-        transcription_credential, fish_api_key = settings.cascade_credentials()
+    async def build_cascade(context: VoiceProviderBuildContext) -> PipelineProviderAdapter:
+        transcription_credential, fish_api_key = (
+            await asyncio.to_thread(settings.cascade_credentials)
+            if settings.transcription_provider == "aws"
+            else settings.cascade_credentials()
+        )
         vad = VADProcessor(
             vad_analyzer=SileroVADAnalyzer(
                 params=VADParams(
