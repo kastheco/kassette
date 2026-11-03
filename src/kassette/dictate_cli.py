@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import importlib.util
 import os
 import sys
 from collections.abc import Sequence
@@ -52,6 +53,20 @@ def main(argv: Sequence[str] | None = None) -> None:
     args = _parser().parse_args(argv)
     if sys.platform != "darwin":
         _fail("kassette dictate requires macOS")
+    required = (
+        "amazon_transcribe",
+        "sounddevice",
+        "AppKit",
+        "ApplicationServices",
+        "AVFoundation",
+        "Quartz",
+    )
+    missing = [name for name in required if importlib.util.find_spec(name) is None]
+    if missing:
+        _fail(
+            "this command needs the dictate extra. install kassette[dictate] "
+            f"(missing: {', '.join(missing)})"
+        )
     if args.hotkey is not None:
         os.environ["KASSETTE_DICTATE_HOTKEY"] = args.hotkey
     try:

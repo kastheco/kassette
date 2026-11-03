@@ -17,6 +17,7 @@
 
 ### fixed
 
+- `kassette dictate` reports missing `dictate` dependencies and the install command before checking configuration or importing macOS adapters
 - dictation's generated Cmd-V events reach the focused app even when `cmd+v` is the hotkey
 - clipboard restoration runs when shutdown interrupts paste settling, without overwriting a newer copy
 - global hotkey startup reports failure when setup exits early or takes longer than ten seconds
