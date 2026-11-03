@@ -50,7 +50,8 @@ def transcribe_stream_url(
     if vocabulary_filter_name:
         params["vocabulary-filter-name"] = vocabulary_filter_name
         params["vocabulary-filter-method"] = "remove"
-    host = f"transcribestreaming.{credentials.region}.amazonaws.com:8443"
+    suffix = "amazonaws.com.cn" if credentials.region.startswith("cn-") else "amazonaws.com"
+    host = f"transcribestreaming.{credentials.region}.{suffix}:8443"
     request = AWSRequest(method="GET", url=f"https://{host}{_STREAM_PATH}", params=params)
     SigV4QueryAuth(
         Credentials(

@@ -41,15 +41,57 @@ def _family(value: str) -> str | None:
 
 
 def _expression_families(expression: str) -> set[str] | None:
-    """Allowed families for an SPDX-style expression, or None when no option is allowed.
+    """Evaluate parentheses and AND before OR, choosing the first allowed alternative.
 
-    Any `OR` alternative may be chosen, and every `AND` part of it must be allowed.
+    Unsupported licenses and exceptions aren't allowed. Malformed expressions fail closed.
     """
-    for alternative in re.split(r"\s+OR\s+", expression.strip().strip("()")):
-        parts = [_family(part.strip("() ")) for part in re.split(r"\s+AND\s+", alternative)]
-        if parts and all(parts):
-            return {part for part in parts if part}
-    return None
+    family = _family(expression)
+    if family is not None:
+        return {family}
+    tokens = re.findall(r"\(|\)|[^\s()]+", expression)
+    position = 0
+
+    def atom() -> set[str] | None:
+        nonlocal position
+        if position == len(tokens):
+            raise ValueError("missing license")
+        token = tokens[position]
+        position += 1
+        if token == "(":
+            value = alternative()
+            if position == len(tokens) or tokens[position] != ")":
+                raise ValueError("unclosed group")
+            position += 1
+            return value
+        if token in {"AND", "OR", ")"}:
+            raise ValueError("expected license")
+        family = _family(token)
+        return {family} if family is not None else None
+
+    def conjunction() -> set[str] | None:
+        nonlocal position
+        value = atom()
+        while position < len(tokens) and tokens[position] == "AND":
+            position += 1
+            right = atom()
+            value = value | right if value is not None and right is not None else None
+        return value
+
+    def alternative() -> set[str] | None:
+        nonlocal position
+        value = conjunction()
+        while position < len(tokens) and tokens[position] == "OR":
+            position += 1
+            right = conjunction()
+            if value is None:
+                value = right
+        return value
+
+    try:
+        families = alternative()
+    except (ValueError, RecursionError):
+        return None
+    return families if position == len(tokens) else None
 
 
 def licenses(metadata: str) -> tuple[list[str], set[str] | None]:

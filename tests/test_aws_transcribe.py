@@ -227,6 +227,25 @@ def test_presigned_url_applies_vocabulary_filter_with_remove_method() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("region", "suffix"),
+    [
+        ("us-west-2", "amazonaws.com"),
+        ("us-gov-west-1", "amazonaws.com"),
+        ("cn-north-1", "amazonaws.com.cn"),
+        ("cn-northwest-1", "amazonaws.com.cn"),
+    ],
+)
+def test_presigned_url_uses_regional_dns_suffix(region: str, suffix: str) -> None:
+    credentials = AWSTranscribeCredentials(ACCESS_KEY, SECRET_KEY, None, region)
+
+    parts = urlsplit(transcribe_stream_url(credentials, language_code="en-US"))
+
+    assert parts.netloc == f"transcribestreaming.{region}.{suffix}:8443"
+    query = dict(parse_qsl(parts.query))
+    assert query["X-Amz-Credential"].split("/")[2:4] == [region, "transcribe"]
+
+
 def transcript_event(text: str, *, partial: bool) -> bytes:
     headers = bytearray()
     headers.extend(get_headers(":message-type", "event"))

@@ -424,7 +424,7 @@ def _recording(
     )
 
 
-async def test_recording_returns_finals_sent_after_end_of_stream_and_drops_late_audio() -> None:
+async def test_recording_drains_captured_audio_before_end_of_stream() -> None:
     stream = FakeTranscribeStream(["um so the jepp release", "ships on friday."])
     microphone = FakeMicrophone()
     recording = _recording(stream, microphone)
@@ -432,7 +432,7 @@ async def test_recording_returns_finals_sent_after_end_of_stream_and_drops_late_
     try:
         microphone.emit(b"\x01\x00" * 1600)
         await _settle()
-        # Scheduled by the audio thread just before stop, so it lands after the end marker.
+        # The audio thread scheduled this chunk, but its queue insertion is still pending.
         microphone.emit(b"\x02\x00" * 1600)
         text = await recording.finish()
     finally:
@@ -440,7 +440,7 @@ async def test_recording_returns_finals_sent_after_end_of_stream_and_drops_late_
 
     assert text == "um so the jepp release ships on friday."
     assert microphone.stopped
-    assert stream.audio == [b"\x01\x00" * 1600]
+    assert stream.audio == [b"\x01\x00" * 1600, b"\x02\x00" * 1600]
     assert stream.ended
     assert stream.audio_after_end == 0
 

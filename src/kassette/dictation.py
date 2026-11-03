@@ -316,7 +316,7 @@ class AudioInput(Protocol):
         ...
 
     def stop(self) -> None:
-        """Stop capture. Safe to call more than once."""
+        """Stop capture and wait for audio callbacks to finish. Safe to call repeatedly."""
         ...
 
 
@@ -439,9 +439,9 @@ class TranscribeDictationRecording:
         if sender is None or receiver is None:
             raise DictationError("recording was not started")
         self._microphone.stop()
-        # Chunks the audio thread scheduled before stop land behind this marker
-        # and are never sent.
-        self._audio.put_nowait(None)
+        # Stop joins the audio callbacks. Schedule the marker behind their pending
+        # queue insertions so every captured chunk reaches AWS before end_stream.
+        asyncio.get_running_loop().call_soon(self._audio.put_nowait, None)
         done, _pending = await asyncio.wait(
             {sender, receiver},
             timeout=self._FINISH_TIMEOUT_SECS,
