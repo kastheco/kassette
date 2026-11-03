@@ -97,15 +97,20 @@ def _expression_families(expression: str) -> set[str] | None:
 def licenses(metadata: str) -> tuple[list[str], set[str] | None]:
     """Return the declared license values and the allowed families, if any are allowed."""
     headers = HeaderParser().parsestr(metadata)
+    expression = headers.get("License-Expression")
+    if expression is not None and expression.strip():
+        # An explicit expression is authoritative: legacy fields can't widen it.
+        expression = " ".join(expression.split())
+        return [expression], _expression_families(expression)
     declared: list[str] = []
-    for key in ("License-Expression", "License"):
-        value = headers.get(key)
-        if value and value.strip() and "\n" not in value.strip():
-            declared.append(value.strip())
+    value = headers.get("License")
+    if value and value.strip() and "\n" not in value.strip():
+        declared.append(value.strip())
     for classifier in headers.get_all("Classifier") or []:
         if classifier.startswith("License :: OSI Approved :: "):
             declared.append(classifier.removeprefix("License :: OSI Approved :: "))
-    # A dist is allowed when any declared value is: classifiers list dual-license options.
+    # Without an expression, a dist is allowed when any legacy value is: classifiers list
+    # dual-license options.
     for value in declared:
         families = _expression_families(value)
         if families is not None:

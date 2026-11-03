@@ -29,6 +29,8 @@
 - dictation drains audio callbacks queued before capture stops, preserving the last recorded words
 - AWS streaming websocket URLs use the China partition's DNS suffix for `cn-` regions
 - the dictate license report respects parentheses and `AND` precedence over `OR`, and rejects malformed expressions
+- the dictate license report treats a `License-Expression` as authoritative, so a permissive legacy license or classifier can't override a rejected expression
+- dictation stops capture and reports the error as soon as the AWS stream fails or closes during a recording, instead of waiting for the stop toggle
 
 ### security
 

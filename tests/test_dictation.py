@@ -26,6 +26,7 @@ class FakeRecording:
         self.start_error = start_error
         self.release_finish = asyncio.Event()
         self.release_finish.set()
+        self.interruption: asyncio.Future[str] = asyncio.get_running_loop().create_future()
         self.started = False
         self.finished = False
         self.closed = False
@@ -34,6 +35,9 @@ class FakeRecording:
         if self.start_error is not None:
             raise DictationError(self.start_error)
         self.started = True
+
+    async def interrupted(self) -> str:
+        return await self.interruption
 
     async def finish(self) -> str:
         await self.release_finish.wait()
@@ -122,6 +126,31 @@ async def test_toggle_while_finalizing_queues_one_recording() -> None:
     controller.toggle()
     await controller.wait_idle()
     assert harness.delivered == ["first", "second"]
+
+
+async def test_broken_stream_ends_the_recording_without_a_toggle() -> None:
+    harness = Harness("um partial words")
+    controller = harness.controller
+    controller.toggle()
+    await _settle()
+    recording = harness.recordings[0]
+    recording.release_finish.clear()
+
+    recording.interruption.set_result("AWS Transcribe failed (ConnectionResetError)")
+    await _settle()
+    assert controller.state is DictationState.FINALIZING
+    assert harness.messages[-1] == (
+        "recording stopped early: AWS Transcribe failed (ConnectionResetError)"
+    )
+    controller.toggle()
+    assert controller.queued
+
+    controller.toggle()
+    recording.release_finish.set()
+    await controller.wait_idle()
+    assert recording.finished and recording.closed
+    assert harness.delivered == ["partial words"]
+    assert controller.state is DictationState.IDLE
 
 
 async def test_third_toggle_cancels_the_queued_recording_and_says_so() -> None:
@@ -354,9 +383,12 @@ def _event(text: str, *, partial: bool) -> TranscriptEvent:
 class FakeTranscribeStream:
     """Partial on first audio. Finals only after end of stream, then the stream closes."""
 
-    def __init__(self, finals: list[str], *, closes: bool = True) -> None:
+    def __init__(
+        self, finals: list[str], *, closes: bool = True, send_error: Exception | None = None
+    ) -> None:
         self.finals = finals
         self.closes = closes
+        self.send_error = send_error
         self.audio: list[bytes] = []
         self.audio_after_end = 0
         self.ended = False
@@ -380,6 +412,8 @@ class FakeTranscribeStream:
             return
         if not self.audio:
             self._events.put_nowait(_event("partial words", partial=True))
+        if self.send_error is not None and self.audio:
+            raise self.send_error
         self.audio.append(audio_chunk or b"")
 
     async def end_stream(self) -> None:
@@ -458,6 +492,25 @@ async def test_recording_falls_back_to_the_partial_when_aws_never_closes() -> No
     finally:
         await recording.close()
 
+    assert text == "partial words"
+
+
+async def test_send_failure_interrupts_recording_and_stops_the_microphone() -> None:
+    stream = FakeTranscribeStream([], closes=False, send_error=ConnectionResetError())
+    microphone = FakeMicrophone()
+    recording = _recording(stream, microphone)
+    recording._FINISH_TIMEOUT_SECS = 0.05  # pyright: ignore[reportPrivateUsage]
+    await recording.start()
+    try:
+        microphone.emit(b"\x01\x00" * 1600)
+        microphone.emit(b"\x02\x00" * 1600)
+        reason = await asyncio.wait_for(recording.interrupted(), 1)
+        text = await recording.finish()
+    finally:
+        await recording.close()
+
+    assert reason == "AWS Transcribe failed (ConnectionResetError)"
+    assert microphone.stopped
     assert text == "partial words"
 
 

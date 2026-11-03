@@ -41,3 +41,23 @@ def test_license_expression_preserves_required_terms(
 
     assert declared == ([expression] if expression else [])
     assert allowed == families
+
+
+def test_license_expression_overrides_permissive_legacy_metadata() -> None:
+    metadata = (
+        "License-Expression: MIT AND GPL-3.0-only\n"
+        "License: MIT\n"
+        "Classifier: License :: OSI Approved :: MIT License\n"
+    )
+
+    assert licenses(metadata) == (["MIT AND GPL-3.0-only"], None)
+
+
+def test_legacy_metadata_allows_any_permissive_option_without_expression() -> None:
+    metadata = (
+        "License: GPL-3.0-only\n"
+        "Classifier: License :: OSI Approved :: GNU General Public License v3 (GPLv3)\n"
+        "Classifier: License :: OSI Approved :: BSD License\n"
+    )
+
+    assert licenses(metadata)[1] == {"BSD"}

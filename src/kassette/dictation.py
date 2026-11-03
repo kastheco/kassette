@@ -101,6 +101,10 @@ async def paste_text(
 class DictationRecording(Protocol):
     async def start(self) -> None: ...
 
+    async def interrupted(self) -> str:
+        """Return a printable reason once the stream ends before `finish` is called."""
+        ...
+
     async def finish(self) -> str:
         """Stop input and return the raw final transcript."""
         ...
@@ -182,9 +186,13 @@ class DictationController:
                 return
             if not self._stop_requested.is_set():
                 self._notify("recording")
-            await self._stop_requested.wait()
+            interruption = await self._wait_stop_or_interruption(recording)
             stopped = monotonic()
-            self._notify("finalizing")
+            if interruption is None:
+                self._notify("finalizing")
+            else:
+                self._state = DictationState.FINALIZING
+                self._notify(f"recording stopped early: {interruption}")
             raw = await recording.finish()
             if not raw.strip():
                 self._notify("no speech was recognized. nothing was pasted")
@@ -208,6 +216,19 @@ class DictationController:
             if self._queued:
                 self._queued = False
                 self._begin()
+
+    async def _wait_stop_or_interruption(self, recording: DictationRecording) -> str | None:
+        """Wait for the stop toggle. Return the reason if the stream breaks first."""
+        stop = asyncio.ensure_future(self._stop_requested.wait())
+        broken = asyncio.ensure_future(recording.interrupted())
+        try:
+            await asyncio.wait({stop, broken}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for waiter in (stop, broken):
+                waiter.cancel()
+        if self._stop_requested.is_set() or broken.cancelled():
+            return None
+        return broken.result()
 
 
 TRANSCRIBE_SAMPLE_RATE = 16_000
@@ -427,6 +448,19 @@ class TranscribeDictationRecording:
                 else:
                     self._finals.append(text)
                     self._partial = None
+
+    async def interrupted(self) -> str:
+        tasks = {task for task in (self._sender, self._receiver) if task is not None}
+        if not tasks:
+            raise DictationError("recording was not started")
+        done, _pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        failure = next(
+            (task.exception() for task in done if not task.cancelled() and task.exception()),
+            None,
+        )
+        if failure is None:
+            return "AWS Transcribe closed the stream"
+        return f"AWS Transcribe failed ({_describe_stream_error(failure)})"
 
     def transcript(self, *, include_partial: bool = False) -> str:
         parts = [*self._finals]
