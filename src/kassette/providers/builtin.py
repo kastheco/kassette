@@ -36,10 +36,8 @@ from kassette.providers.runtime import (
 )
 from kassette.sessions import SessionRegistry
 from kassette.settings import KassetteSettings
-from kassette.transcript_grooming import (
-    TranscriptGroomingProcessor,
-    load_transcript_groomer,
-)
+from kassette.transcript_grooming import load_transcript_groomer
+from kassette.transcript_grooming_processor import TranscriptGroomingProcessor
 
 
 class PausableOpenAIRealtimeSTTService(OpenAIRealtimeSTTService):

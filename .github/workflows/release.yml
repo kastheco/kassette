@@ -207,7 +207,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install --yes portaudio19-dev
 
       - name: install Python dependencies
-        run: uv sync --locked --dev
+        run: uv sync --locked --dev --all-extras
 
       - name: run Python tests and checks
         run: |

@@ -1,4 +1,4 @@
-"""Pluggable transcript grooming for cascaded voice sessions."""
+"""Pipecat-free transcript grooming core: profile model, rules, and the fail-open seam."""
 
 from __future__ import annotations
 
@@ -10,8 +10,6 @@ from time import perf_counter
 from typing import Any, Literal, Protocol
 
 from loguru import logger
-from pipecat.frames.frames import Frame, InterimTranscriptionFrame, TranscriptionFrame
-from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from kassette.filler_filter import filter_filler_words
@@ -254,50 +252,6 @@ def load_transcript_groomer(profile_path: Path | None) -> TranscriptGroomer:
         raise ValueError(f"transcript grooming profile exceeds {_MAX_PROFILE_BYTES} bytes")
     profile = TranscriptGroomingProfile.model_validate_json(raw)
     return RuleTranscriptGroomer(profile)
-
-
-class TranscriptGroomingProcessor(FrameProcessor):
-    """Apply a groomer after STT and before normalized transcript events."""
-
-    def __init__(
-        self,
-        groomer: TranscriptGroomer,
-        *,
-        timeout_secs: float = 0.5,
-        name: str | None = None,
-        enable_direct_mode: bool = False,
-    ) -> None:
-        if timeout_secs <= 0:
-            raise ValueError("timeout_secs must be positive")
-        super().__init__(  # pyright: ignore[reportUnknownMemberType]
-            name=name,
-            enable_direct_mode=enable_direct_mode,
-        )
-        self._groomer = groomer
-        self._timeout_secs = timeout_secs
-
-    async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
-        await super().process_frame(frame, direction)
-        if direction is FrameDirection.DOWNSTREAM and isinstance(
-            frame,
-            (InterimTranscriptionFrame, TranscriptionFrame),
-        ):
-            await self._groom_frame(frame)
-        await self.push_frame(frame, direction)
-
-    async def _groom_frame(
-        self,
-        frame: InterimTranscriptionFrame | TranscriptionFrame,
-    ) -> None:
-        frame.text = await groom_transcript(
-            self._groomer,
-            TranscriptGroomingRequest(
-                text=frame.text,
-                final=isinstance(frame, TranscriptionFrame),
-                language=str(frame.language) if frame.language is not None else None,
-            ),
-            timeout_secs=self._timeout_secs,
-        )
 
 
 async def groom_transcript(

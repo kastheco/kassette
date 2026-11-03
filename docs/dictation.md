@@ -2,16 +2,17 @@
 
 `kassette dictate` is a local, single-user dictation mode for macos. press the hotkey once to start recording and again to stop. kassette streams the microphone to AWS Transcribe while you speak. when you stop, it ends the stream, waits for the final transcript, runs it through your transcript grooming profile and pastes it at the cursor in the focused app.
 
-dictation runs in its own foreground process. it doesn't start the webrtc service, and it doesn't use a voice session or a provider other than `aws`.
+dictation runs in its own foreground process. it doesn't start the webrtc service or load pipecat, and it doesn't use a voice session or a provider other than `aws`. it streams microphone audio to AWS Transcribe directly through `amazon-transcribe`, captures it with `sounddevice`, and uses pyobjc for the hotkey and paste.
 
 ## prerequisites
 
-kassette needs PortAudio before the python dependencies install:
+install the `dictate` extra. it doesn't need the `voice` extra, and the `sounddevice` wheel for macos bundles PortAudio, so `brew install portaudio` isn't needed for dictation:
 
 ```bash
-brew install portaudio
-uv sync --locked
+uv sync --locked --extra dictate
 ```
+
+every package `kassette[dictate]` installs is MIT, MIT-0, BSD, Apache-2.0 or PSF licensed. `scripts/dictate_license_report.py` prints the report, and ci fails if a new dependency breaks it.
 
 dictation needs AWS Transcribe streaming, so set `KASSETTE_TRANSCRIPTION_PROVIDER=aws`. gemini and openai don't end a stream with a definitive final transcript, so `dictate` rejects them.
 
@@ -22,7 +23,7 @@ use a personal AWS account. kassette reads credentials from the standard AWS cha
 - a named profile: `AWS_PROFILE=personal`, set up with `aws configure --profile personal` or `aws configure sso --profile personal`. run `aws sso login --profile personal` when an SSO session expires.
 - environment variables: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and optionally `AWS_SESSION_TOKEN`.
 
-the identity needs `transcribe:StartStreamTranscriptionWebSocket`. kassette never logs credentials or the presigned stream URL.
+the identity needs `transcribe:StartStreamTranscription`. kassette never logs credentials.
 
 the region comes from `KASSETTE_AWS_REGION`, then `AWS_REGION`, then `AWS_DEFAULT_REGION` or the profile's region, then `us-east-1`.
 
@@ -45,7 +46,7 @@ restart the terminal app after you change either permission. macos applies some 
 ## run it
 
 ```bash
-KASSETTE_TRANSCRIPTION_PROVIDER=aws AWS_PROFILE=personal uv run kassette dictate
+KASSETTE_TRANSCRIPTION_PROVIDER=aws AWS_PROFILE=personal uv run --extra dictate kassette dictate
 ```
 
 the default hotkey is `ctrl+option+d`. change it with `KASSETTE_DICTATE_HOTKEY` or `--hotkey`. a hotkey is one key plus modifiers joined with `+`, for example `cmd+shift+space` or `option+f13`. the modifiers are `ctrl`, `option`, `shift` and `cmd`. function keys `f1` to `f20` may be used alone. kassette swallows the hotkey so the focused app doesn't receive it.

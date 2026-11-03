@@ -1,35 +1,21 @@
-"""Toggle dictation: record on a hotkey, finalize, groom, and paste at the cursor."""
+"""Toggle dictation: record on a hotkey, finalize, groom, and paste at the cursor.
+
+Pipecat-free. Audio comes from sounddevice and goes straight to AWS Transcribe
+streaming through amazon-transcribe, so `kassette[dictate]` stays small.
+"""
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterable, Awaitable, Callable, Sequence
 from contextlib import suppress
 from enum import StrEnum
 from time import monotonic
-from typing import Protocol
+from typing import Any, Protocol
 
-from pipecat.frames.frames import (
-    Frame,
-    InputAudioRawFrame,
-    InterimTranscriptionFrame,
-    StartFrame,
-    TranscriptionFrame,
-)
-from pipecat.pipeline.pipeline import Pipeline
-from pipecat.pipeline.worker import PipelineParams, PipelineWorker
-from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
-from pipecat.transports.local.audio import LocalAudioTransportParams
-from pipecat.workers.runner import WorkerRunner
-
-from kassette.aws_credentials import AWSCredentialsUnavailableError
+from kassette.aws_credentials import AWSCredentialsUnavailableError, AWSTranscribeCredentials
 from kassette.hotkey import Hotkey
-from kassette.providers.aws_transcribe import (
-    TRANSCRIBE_SAMPLE_RATE,
-    PausableAWSTranscribeSTTService,
-)
 from kassette.settings import KassetteSettings
-from kassette.terminal_audio import StableLocalAudioTransport
 from kassette.transcript_grooming import (
     TranscriptGroomer,
     TranscriptGroomingRequest,
@@ -39,9 +25,6 @@ from kassette.transcript_grooming import (
 
 Notify = Callable[[str], None]
 
-_START_TIMEOUT_SECS = 10.0
-_FLUSH_TIMEOUT_SECS = 2.0
-_CLOSE_TIMEOUT_SECS = 5.0
 _PASTE_SETTLE_SECS = 0.25
 
 
@@ -227,56 +210,28 @@ class DictationController:
                 self._begin()
 
 
-class DictationTranscriptCollector(FrameProcessor):
-    """Collect final transcript segments in order at the end of the dictation pipeline."""
-
-    def __init__(self) -> None:
-        super().__init__(name="DictationTranscriptCollector")  # pyright: ignore[reportUnknownMemberType]
-        self.started = asyncio.Event()
-        self._finals: list[str] = []
-        self._interim: str | None = None
-
-    async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
-        await super().process_frame(frame, direction)
-        if isinstance(frame, InputAudioRawFrame):
-            return
-        if isinstance(frame, TranscriptionFrame):
-            self._finals.append(frame.text)
-            self._interim = None
-        elif isinstance(frame, InterimTranscriptionFrame):
-            self._interim = frame.text
-        await self.push_frame(frame, direction)
-        if isinstance(frame, StartFrame):
-            self.started.set()
-
-    def transcript(self, *, include_interim: bool = False) -> str:
-        parts = [*self._finals]
-        if include_interim and self._interim:
-            parts.append(self._interim)
-        return " ".join(part.strip() for part in parts if part.strip())
+TRANSCRIBE_SAMPLE_RATE = 16_000
+TRANSCRIBE_LANGUAGE = "en-US"
+# 100 ms of 16-bit mono PCM per audio event, well under the 32 KB event limit.
+_CHUNK_FRAMES = TRANSCRIBE_SAMPLE_RATE // 10
 
 
-def build_dictation_stt(settings: KassetteSettings) -> PausableAWSTranscribeSTTService:
-    """Build the transcription service for one recording."""
+def dictation_credentials(settings: KassetteSettings) -> AWSTranscribeCredentials:
+    """Resolve AWS credentials for one recording, or fail with a printable reason."""
     if settings.transcription_provider != "aws":
         raise DictationError(
             "kassette dictate needs KASSETTE_TRANSCRIPTION_PROVIDER=aws, which ends the "
             f"stream with a definitive final transcript (got {settings.transcription_provider})"
         )
     try:
-        credentials = settings.aws_transcription_credentials()
+        return settings.aws_transcription_credentials()
     except AWSCredentialsUnavailableError as error:
         raise DictationError(str(error)) from None
-    return PausableAWSTranscribeSTTService(
-        credentials=credentials,
-        vocabulary_name=settings.aws_vocabulary_name,
-        vocabulary_filter_name=settings.aws_vocabulary_filter_name,
-    )
 
 
 def validate_dictation_settings(settings: KassetteSettings) -> TranscriptGroomer:
     """Fail fast on provider, credential, and grooming profile problems."""
-    build_dictation_stt(settings)
+    dictation_credentials(settings)
     try:
         return load_transcript_groomer(settings.transcript_grooming_profile)
     except (OSError, ValueError) as error:
@@ -285,94 +240,232 @@ def validate_dictation_settings(settings: KassetteSettings) -> TranscriptGroomer
         ) from None
 
 
-InputFactory = Callable[[KassetteSettings], FrameProcessor]
+class TranscribeAudioInput(Protocol):
+    async def send_audio_event(self, audio_chunk: bytes | None) -> None: ...
+
+    async def end_stream(self) -> None: ...
 
 
-def local_microphone_input(settings: KassetteSettings) -> FrameProcessor:
-    transport = StableLocalAudioTransport(
-        LocalAudioTransportParams(
-            audio_in_enabled=True,
-            audio_out_enabled=False,
-            audio_in_sample_rate=TRANSCRIBE_SAMPLE_RATE,
-            input_device_index=settings.input_device_index,
+class TranscribeAlternative(Protocol):
+    @property
+    def transcript(self) -> str: ...
+
+
+class TranscribeResult(Protocol):
+    @property
+    def is_partial(self) -> bool | None: ...
+
+    @property
+    def alternatives(self) -> Sequence[TranscribeAlternative] | None: ...
+
+
+class TranscribeTranscript(Protocol):
+    @property
+    def results(self) -> Sequence[TranscribeResult]: ...
+
+
+class TranscribeEvent(Protocol):
+    @property
+    def transcript(self) -> TranscribeTranscript: ...
+
+
+class TranscribeStream(Protocol):
+    """The part of amazon-transcribe's StartStreamTranscriptionEventStream we use."""
+
+    @property
+    def input_stream(self) -> TranscribeAudioInput: ...
+
+    @property
+    def output_stream(self) -> AsyncIterable[TranscribeEvent]: ...
+
+
+StreamOpener = Callable[[KassetteSettings], Awaitable[TranscribeStream]]
+
+
+async def open_transcribe_stream(settings: KassetteSettings) -> TranscribeStream:
+    """Start one AWS Transcribe stream. Credentials never reach logs or messages."""
+    from amazon_transcribe.auth import StaticCredentialResolver
+    from amazon_transcribe.client import TranscribeStreamingClient
+
+    credentials = await asyncio.to_thread(dictation_credentials, settings)
+    client = TranscribeStreamingClient(
+        region=credentials.region,
+        credential_resolver=StaticCredentialResolver(
+            credentials.access_key_id,
+            credentials.secret_access_key,
+            credentials.session_token,
         ),
-        input_name=settings.input_device_name,
     )
-    return transport.input()
+    filter_name = settings.aws_vocabulary_filter_name
+    stream: Any = await client.start_stream_transcription(  # pyright: ignore[reportUnknownMemberType]
+        language_code=TRANSCRIBE_LANGUAGE,
+        media_sample_rate_hz=TRANSCRIBE_SAMPLE_RATE,
+        media_encoding="pcm",
+        vocabulary_name=settings.aws_vocabulary_name,
+        vocab_filter_name=filter_name,
+        vocab_filter_method="remove" if filter_name else None,
+        enable_partial_results_stabilization=True,
+        partial_results_stability="high",
+    )
+    return stream
 
 
-class PipecatDictationRecording:
-    """One recording: microphone → AWS Transcribe → collector, torn down after finish."""
+class AudioInput(Protocol):
+    def start(self, on_chunk: Callable[[bytes], None]) -> None:
+        """Start capture. `on_chunk` runs on the audio thread with 16 kHz mono PCM."""
+        ...
+
+    def stop(self) -> None:
+        """Stop capture. Safe to call more than once."""
+        ...
+
+
+class SoundDeviceMicrophone:
+    """PortAudio capture through sounddevice, which bundles PortAudio on macOS."""
+
+    def __init__(self, device: int | str | None = None) -> None:
+        self._device = device
+        self._stream: Any = None
+
+    def start(self, on_chunk: Callable[[bytes], None]) -> None:
+        import sounddevice
+
+        def callback(data: Any, _frames: int, _time: Any, _status: Any) -> None:
+            on_chunk(bytes(data))
+
+        stream = sounddevice.RawInputStream(
+            samplerate=TRANSCRIBE_SAMPLE_RATE,
+            channels=1,
+            dtype="int16",
+            blocksize=_CHUNK_FRAMES,
+            device=self._device,
+            callback=callback,
+        )
+        self._stream = stream
+        stream.start()
+
+    def stop(self) -> None:
+        stream, self._stream = self._stream, None
+        if stream is not None:
+            stream.stop()
+            stream.close()
+
+
+def settings_microphone(settings: KassetteSettings) -> AudioInput:
+    if settings.input_device_index is not None:
+        return SoundDeviceMicrophone(settings.input_device_index)
+    return SoundDeviceMicrophone(settings.input_device_name)
+
+
+def _describe_stream_error(error: BaseException) -> str:
+    message = getattr(error, "message", None)
+    name = type(error).__name__
+    return f"{name}: {message}" if isinstance(message, str) and message else name
+
+
+class TranscribeDictationRecording:
+    """One recording: microphone → AWS Transcribe, ended with a drained final result."""
+
+    _START_TIMEOUT_SECS = 10.0
+    _FINISH_TIMEOUT_SECS = 3.0
 
     def __init__(
         self,
         settings: KassetteSettings,
         *,
-        input_factory: InputFactory = local_microphone_input,
-        stt_factory: Callable[[KassetteSettings], PausableAWSTranscribeSTTService] = (
-            build_dictation_stt
-        ),
+        microphone: AudioInput,
+        open_stream: StreamOpener = open_transcribe_stream,
     ) -> None:
         self._settings = settings
-        self._input_factory = input_factory
-        self._stt_factory = stt_factory
-        self._stt: PausableAWSTranscribeSTTService | None = None
-        self._collector = DictationTranscriptCollector()
-        self._worker: PipelineWorker | None = None
-        self._run_task: asyncio.Task[None] | None = None
+        self._microphone = microphone
+        self._open_stream = open_stream
+        self._audio: asyncio.Queue[bytes | None] = asyncio.Queue()
+        self._finals: list[str] = []
+        self._partial: str | None = None
+        self._sender: asyncio.Task[None] | None = None
+        self._receiver: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
-        stt = self._stt_factory(self._settings)
-        self._stt = stt
         try:
-            source = self._input_factory(self._settings)
+            async with asyncio.timeout(self._START_TIMEOUT_SECS):
+                stream = await self._open_stream(self._settings)
+        except DictationError:
+            raise
+        except TimeoutError:
+            raise DictationError("AWS Transcribe didn't accept the stream in time") from None
         except Exception as error:
-            raise DictationError(f"microphone unavailable ({error})") from None
-        worker = PipelineWorker(
-            Pipeline([source, stt, self._collector]),
-            params=PipelineParams(enable_metrics=False, enable_usage_metrics=False),
-            idle_timeout_secs=None,
-            enable_rtvi=False,
-        )
-        self._worker = worker
-        runner = WorkerRunner(handle_sigint=False)
-        await runner.add_workers(worker)
-        run_task = asyncio.create_task(runner.run())
-        self._run_task = run_task
-        started = asyncio.create_task(self._collector.started.wait())
-        done, _pending = await asyncio.wait(
-            {started, run_task},
-            timeout=_START_TIMEOUT_SECS,
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        if started not in done:
-            started.cancel()
-            if run_task in done and not run_task.cancelled() and run_task.exception():
-                failure = type(run_task.exception()).__name__
-                raise DictationError(f"audio pipeline failed ({failure})")
-            raise DictationError(stt.last_error or "the microphone stream didn't start in time")
-        if not stt.connected:
-            raise DictationError(stt.last_error or "AWS Transcribe didn't connect")
+            raise DictationError(
+                f"AWS Transcribe rejected the stream ({_describe_stream_error(error)})"
+            ) from None
+        self._receiver = asyncio.create_task(self._receive(stream))
+        self._sender = asyncio.create_task(self._send(stream))
+        loop = asyncio.get_running_loop()
+        audio = self._audio
+
+        def on_chunk(chunk: bytes) -> None:
+            loop.call_soon_threadsafe(audio.put_nowait, chunk)
+
+        try:
+            self._microphone.start(on_chunk)
+        except Exception as error:
+            raise DictationError(f"microphone unavailable ({type(error).__name__})") from None
+
+    async def _send(self, stream: TranscribeStream) -> None:
+        while (chunk := await self._audio.get()) is not None:
+            await stream.input_stream.send_audio_event(audio_chunk=chunk)
+        # AWS answers the end of stream with the remaining finals, then closes.
+        await stream.input_stream.end_stream()
+
+    async def _receive(self, stream: TranscribeStream) -> None:
+        async for event in stream.output_stream:
+            for result in event.transcript.results:
+                if not result.alternatives:
+                    continue
+                text = result.alternatives[0].transcript
+                if result.is_partial:
+                    self._partial = text
+                else:
+                    self._finals.append(text)
+                    self._partial = None
+
+    def transcript(self, *, include_partial: bool = False) -> str:
+        parts = [*self._finals]
+        if include_partial and self._partial:
+            parts.append(self._partial)
+        return " ".join(part.strip() for part in parts if part.strip())
 
     async def finish(self) -> str:
-        stt = self._stt
-        worker = self._worker
-        if stt is None or worker is None:
+        sender, receiver = self._sender, self._receiver
+        if sender is None or receiver is None:
             raise DictationError("recording was not started")
-        finalized = await stt.finish_input()
-        await worker.flush_pipeline(timeout=_FLUSH_TIMEOUT_SECS)
-        text = self._collector.transcript(include_interim=not finalized)
-        if not text and stt.last_error:
-            raise DictationError(stt.last_error)
+        self._microphone.stop()
+        # Chunks the audio thread scheduled before stop land behind this marker
+        # and are never sent.
+        self._audio.put_nowait(None)
+        done, _pending = await asyncio.wait(
+            {sender, receiver},
+            timeout=self._FINISH_TIMEOUT_SECS,
+            return_when=asyncio.ALL_COMPLETED,
+        )
+        failure = next(
+            (task.exception() for task in (sender, receiver) if task in done and task.exception()),
+            None,
+        )
+        finalized = receiver in done and failure is None
+        text = self.transcript(include_partial=not finalized)
+        if not text and failure is not None:
+            raise DictationError(f"AWS Transcribe failed ({_describe_stream_error(failure)})")
         return text
 
     async def close(self) -> None:
-        if self._worker is not None:
-            await self._worker.cancel()
-        run_task = self._run_task
-        if run_task is not None:
-            with suppress(Exception, asyncio.CancelledError):
-                await asyncio.wait_for(run_task, _CLOSE_TIMEOUT_SECS)
+        with suppress(Exception):
+            self._microphone.stop()
+        for task in (self._sender, self._receiver):
+            if task is not None and not task.done():
+                task.cancel()
+            if task is not None:
+                with suppress(BaseException):
+                    await task
 
 
 class DictationPlatform(Protocol):
@@ -409,7 +502,9 @@ async def run_dictation(
         return await paste_text(text, platform.clipboard, platform.keystroke, notify=notify)
 
     controller = DictationController(
-        new_recording=lambda: PipecatDictationRecording(settings),
+        new_recording=lambda: TranscribeDictationRecording(
+            settings, microphone=settings_microphone(settings)
+        ),
         groom=groom,
         deliver=deliver,
         notify=notify,

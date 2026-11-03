@@ -1,17 +1,23 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator, Callable
 
 import pytest
+from amazon_transcribe.exceptions import BadRequestException
+from amazon_transcribe.model import Alternative, Result, Transcript, TranscriptEvent
 
 from kassette.dictation import (
     DictationController,
     DictationError,
     DictationState,
     PasteOutcome,
+    TranscribeDictationRecording,
+    TranscribeStream,
     paste_text,
 )
 from kassette.hotkey import COMMAND_MASK, CONTROL_MASK, OPTION_MASK, SHIFT_MASK, parse_hotkey
+from kassette.settings import KassetteSettings
 
 
 class FakeRecording:
@@ -330,3 +336,146 @@ def test_hotkey_matches_exact_modifiers_and_ignores_caps_lock() -> None:
     assert not hotkey.matches(2, CONTROL_MASK | OPTION_MASK | SHIFT_MASK)
     assert not hotkey.matches(2, CONTROL_MASK)
     assert not hotkey.matches(3, CONTROL_MASK | OPTION_MASK)
+
+
+def _event(text: str, *, partial: bool) -> TranscriptEvent:
+    return TranscriptEvent(
+        Transcript(
+            [
+                Result(
+                    is_partial=partial,
+                    alternatives=[Alternative(transcript=text, items=[], entities=[])],
+                )
+            ]
+        )
+    )
+
+
+class FakeTranscribeStream:
+    """Partial on first audio. Finals only after end of stream, then the stream closes."""
+
+    def __init__(self, finals: list[str], *, closes: bool = True) -> None:
+        self.finals = finals
+        self.closes = closes
+        self.audio: list[bytes] = []
+        self.audio_after_end = 0
+        self.ended = False
+        self._events: asyncio.Queue[TranscriptEvent | None] = asyncio.Queue()
+
+    @property
+    def input_stream(self) -> FakeTranscribeStream:
+        return self
+
+    @property
+    def output_stream(self) -> AsyncIterator[TranscriptEvent]:
+        return self._output()
+
+    async def _output(self) -> AsyncIterator[TranscriptEvent]:
+        while (event := await self._events.get()) is not None:
+            yield event
+
+    async def send_audio_event(self, audio_chunk: bytes | None) -> None:
+        if self.ended:
+            self.audio_after_end += 1
+            return
+        if not self.audio:
+            self._events.put_nowait(_event("partial words", partial=True))
+        self.audio.append(audio_chunk or b"")
+
+    async def end_stream(self) -> None:
+        self.ended = True
+        for text in self.finals:
+            self._events.put_nowait(_event(text, partial=False))
+        if self.closes:
+            self._events.put_nowait(None)
+
+
+class FakeMicrophone:
+    def __init__(self, *, error: Exception | None = None) -> None:
+        self.error = error
+        self.on_chunk: Callable[[bytes], None] | None = None
+        self.stopped = False
+
+    def start(self, on_chunk: Callable[[bytes], None]) -> None:
+        if self.error is not None:
+            raise self.error
+        self.on_chunk = on_chunk
+
+    def stop(self) -> None:
+        self.stopped = True
+
+    def emit(self, chunk: bytes) -> None:
+        assert self.on_chunk is not None and not self.stopped
+        self.on_chunk(chunk)
+
+
+def _recording(
+    stream: FakeTranscribeStream | Exception, microphone: FakeMicrophone
+) -> TranscribeDictationRecording:
+    async def open_stream(_settings: KassetteSettings) -> TranscribeStream:
+        if isinstance(stream, Exception):
+            raise stream
+        return stream
+
+    return TranscribeDictationRecording(
+        KassetteSettings(KASSETTE_TRANSCRIPTION_PROVIDER="aws"),  # pyright: ignore[reportCallIssue]
+        microphone=microphone,
+        open_stream=open_stream,
+    )
+
+
+async def test_recording_returns_finals_sent_after_end_of_stream_and_drops_late_audio() -> None:
+    stream = FakeTranscribeStream(["um so the jepp release", "ships on friday."])
+    microphone = FakeMicrophone()
+    recording = _recording(stream, microphone)
+    await recording.start()
+    try:
+        microphone.emit(b"\x01\x00" * 1600)
+        await _settle()
+        # Scheduled by the audio thread just before stop, so it lands after the end marker.
+        microphone.emit(b"\x02\x00" * 1600)
+        text = await recording.finish()
+    finally:
+        await recording.close()
+
+    assert text == "um so the jepp release ships on friday."
+    assert microphone.stopped
+    assert stream.audio == [b"\x01\x00" * 1600]
+    assert stream.ended
+    assert stream.audio_after_end == 0
+
+
+async def test_recording_falls_back_to_the_partial_when_aws_never_closes() -> None:
+    stream = FakeTranscribeStream([], closes=False)
+    microphone = FakeMicrophone()
+    recording = _recording(stream, microphone)
+    recording._FINISH_TIMEOUT_SECS = 0.05  # pyright: ignore[reportPrivateUsage]
+    await recording.start()
+    try:
+        microphone.emit(b"\x01\x00" * 1600)
+        await _settle()
+        text = await recording.finish()
+    finally:
+        await recording.close()
+
+    assert text == "partial words"
+
+
+async def test_rejected_stream_fails_start_with_the_aws_reason() -> None:
+    recording = _recording(
+        BadRequestException("The requested vocabulary filter couldn't be found."),
+        FakeMicrophone(),
+    )
+
+    with pytest.raises(DictationError, match="BadRequestException: The requested vocabulary"):
+        await recording.start()
+    await recording.close()
+
+
+async def test_microphone_failure_fails_start_and_close_ends_the_stream_tasks() -> None:
+    stream = FakeTranscribeStream([])
+    recording = _recording(stream, FakeMicrophone(error=OSError("PortAudio library not found")))
+
+    with pytest.raises(DictationError, match=r"microphone unavailable \(OSError\)"):
+        await recording.start()
+    await asyncio.wait_for(recording.close(), 1)

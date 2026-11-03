@@ -42,10 +42,8 @@ from kassette.sessions import (
     SessionRegistry,
 )
 from kassette.settings import KassetteSettings, load_settings
-from kassette.transcript_grooming import (
-    TranscriptGroomingProcessor,
-    load_transcript_groomer,
-)
+from kassette.transcript_grooming import load_transcript_groomer
+from kassette.transcript_grooming_processor import TranscriptGroomingProcessor
 
 _initial_settings = load_settings()
 _registry = SessionRegistry(lease_policy=_initial_settings.audio_lease_policy)

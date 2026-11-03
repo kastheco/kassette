@@ -5,8 +5,15 @@
 ### added
 
 - `aws` transcription provider using AWS Transcribe streaming, with credentials from the standard AWS chain, an optional region, and an optional custom vocabulary and vocabulary filter applied with `remove`
-- `kassette dictate`, a macos toggle dictation mode: one global hotkey starts and stops recording, then kassette waits for the final AWS transcript, grooms it and pastes it at the cursor while preserving the clipboard
-- dictation docs covering portaudio, Microphone and Accessibility permissions, AWS setup and a sample dictation grooming profile
+- `kassette dictate`, a macos toggle dictation mode: one global hotkey starts and stops recording, then kassette waits for the final AWS transcript, grooms it and pastes it at the cursor while preserving the clipboard. it talks to AWS Transcribe through `amazon-transcribe` and records with `sounddevice`, without pipecat
+- dictation docs covering Microphone and Accessibility permissions, AWS setup and a sample dictation grooming profile
+- ci license report for `kassette[dictate]`, which fails on any license outside MIT, MIT-0, BSD, Apache-2.0 and PSF and on any voice-stack package
+
+### changed
+
+- **breaking for installs:** pipecat, aiortc, av, google-genai, aiohttp and typer moved from the base dependencies to a `voice` extra. install `kassette[voice]` (or `uv sync --extra voice`) for `kassette serve` and `kassette call`. the container image installs it. `kassette dictate` needs only the new `dictate` extra
+- `kassette.transcript_grooming` is now pipecat-free. `TranscriptGroomingProcessor` moved to `kassette.transcript_grooming_processor`
+- the `kassette` entry point dispatches `dictate` to an argparse command and every other command to the typer app, so neither extra imports the other's dependencies
 
 ### fixed
 

@@ -11,7 +11,7 @@ from pathlib import Path
 from urllib.parse import parse_qsl, urlsplit
 
 import pytest
-from pipecat.frames.frames import Frame, InputAudioRawFrame, StartFrame
+from pipecat.frames.frames import Frame, InputAudioRawFrame, StartFrame, TranscriptionFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.worker import PipelineWorker
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
@@ -21,12 +21,7 @@ from pydantic import ValidationError
 from websockets.asyncio.server import Server, ServerConnection, serve
 
 from kassette.aws_credentials import AWSCredentialsUnavailableError, AWSTranscribeCredentials
-from kassette.dictation import (
-    DictationError,
-    DictationTranscriptCollector,
-    PipecatDictationRecording,
-    build_dictation_stt,
-)
+from kassette.dictation import DictationError, dictation_credentials
 from kassette.providers import aws_transcribe
 from kassette.providers.aws_transcribe import (
     PausableAWSTranscribeSTTService,
@@ -135,7 +130,7 @@ def test_missing_aws_credentials_fail_with_setup_guidance(isolated_aws: None) ->
     with pytest.raises(AWSCredentialsUnavailableError, match="AWS_PROFILE"):
         settings.transcription_credential()
     with pytest.raises(DictationError, match="AWS_PROFILE"):
-        build_dictation_stt(settings)
+        dictation_credentials(settings)
 
 
 def test_unknown_aws_profile_fails_without_a_traceback_chain(
@@ -201,7 +196,7 @@ def test_aws_cascade_readiness_waits_for_start_and_still_requires_fish(
 
 def test_dictation_rejects_providers_without_a_definitive_end_of_stream() -> None:
     with pytest.raises(DictationError, match="KASSETTE_TRANSCRIPTION_PROVIDER=aws"):
-        build_dictation_stt(_settings(KASSETTE_TRANSCRIPTION_PROVIDER="gemini"))
+        dictation_credentials(_settings(KASSETTE_TRANSCRIPTION_PROVIDER="gemini"))
 
 
 def test_presigned_url_applies_vocabulary_filter_with_remove_method() -> None:
@@ -351,32 +346,19 @@ async def fake_transcribe(monkeypatch: pytest.MonkeyPatch) -> AsyncGenerator[Fak
     await server.stop()
 
 
-def _aws_stt(_settings: KassetteSettings) -> PausableAWSTranscribeSTTService:
-    return PausableAWSTranscribeSTTService(
-        credentials=AWSTranscribeCredentials(ACCESS_KEY, SECRET_KEY, None, "us-east-1")
-    )
+class _FinalsCollector(FrameProcessor):
+    def __init__(self) -> None:
+        super().__init__(name="FinalsCollector")  # pyright: ignore[reportUnknownMemberType]
+        self.started = asyncio.Event()
+        self.finals: list[str] = []
 
-
-async def test_recording_waits_for_finals_after_end_of_stream(
-    fake_transcribe: FakeTranscribe,
-) -> None:
-    recording = PipecatDictationRecording(
-        _settings(KASSETTE_TRANSCRIPTION_PROVIDER="aws"),
-        input_factory=lambda _settings: _SilentMicrophone(),
-        stt_factory=_aws_stt,
-    )
-    await recording.start()
-    try:
-        await asyncio.sleep(0.2)
-        text = await recording.finish()
-    finally:
-        await recording.close()
-
-    assert text == "um so the jepp release ships on friday."
-    assert fake_transcribe.audio_bytes > 0
-    assert fake_transcribe.ended
-    assert fake_transcribe.audio_after_end == 0
-    assert fake_transcribe.connections == 1
+    async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
+        await super().process_frame(frame, direction)
+        if isinstance(frame, TranscriptionFrame):
+            self.finals.append(frame.text)
+        await self.push_frame(frame, direction)
+        if isinstance(frame, StartFrame):
+            self.started.set()
 
 
 async def test_cascade_pause_drains_finals_and_resume_reconnects(
@@ -418,7 +400,7 @@ async def test_cascade_pause_drains_finals_and_resume_reconnects(
     )
     assert isinstance(service, PausableAWSTranscribeSTTService)
     stt = service
-    collector = DictationTranscriptCollector()
+    collector = _FinalsCollector()
     worker = PipelineWorker(
         Pipeline([_SilentMicrophone(), stt, collector]),
         idle_timeout_secs=None,
@@ -431,7 +413,7 @@ async def test_cascade_pause_drains_finals_and_resume_reconnects(
         await asyncio.wait_for(collector.started.wait(), 5)
         await stt.pause_input()
         await worker.flush_pipeline(timeout=2)
-        assert collector.transcript() == "um so the jepp release ships on friday."
+        assert collector.finals == ["um so the jepp release", "ships on friday."]
         assert not stt.connected
         assert fake_transcribe.request_queries[0]["X-Amz-Security-Token"] == "first-session"
         credentials = AWSTranscribeCredentials(
@@ -447,21 +429,3 @@ async def test_cascade_pause_drains_finals_and_resume_reconnects(
     finally:
         await worker.cancel()
         await asyncio.wait_for(run_task, 5)
-
-
-async def test_recording_start_reports_rejected_connection(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        aws_transcribe, "transcribe_stream_url", _fixed_url("ws://127.0.0.1:9/closed")
-    )
-    recording = PipecatDictationRecording(
-        _settings(KASSETTE_TRANSCRIPTION_PROVIDER="aws"),
-        input_factory=lambda _settings: _SilentMicrophone(),
-        stt_factory=_aws_stt,
-    )
-    try:
-        with pytest.raises(DictationError, match="Unable to connect to AWS Transcribe"):
-            await recording.start()
-    finally:
-        await recording.close()

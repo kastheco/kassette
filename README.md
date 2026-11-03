@@ -24,7 +24,7 @@ the repository also includes `pi-kassette`, a linux terminal voice client for pi
 ## local mode
 
 ```bash
-uv sync
+uv sync --extra voice
 cp .env.example .env
 # add GOOGLE_API_KEY and FISH_API_KEY to .env.
 # or select openai transcription and add OPENAI_API_KEY instead.
@@ -43,12 +43,20 @@ message playback uses `POST /api/tts` on the same local service. the endpoint ac
 `kassette dictate` turns a global hotkey into fast dictation on macos. press it once to start, speak, and press it again. kassette streams to AWS Transcribe, waits for the final transcript, grooms it and pastes it at the cursor in the focused app. it runs as its own local process, outside the webrtc service.
 
 ```bash
-brew install portaudio
-uv sync --locked
-KASSETTE_TRANSCRIPTION_PROVIDER=aws AWS_PROFILE=personal uv run kassette dictate
+uv sync --locked --extra dictate
+KASSETTE_TRANSCRIPTION_PROVIDER=aws AWS_PROFILE=personal uv run --extra dictate kassette dictate
 ```
 
 the default hotkey is `ctrl+option+d`. the terminal app needs Microphone and Accessibility access. audio and transcripts stay off disk, and status output leaves transcript text out. see [docs/dictation.md](docs/dictation.md) for permissions, AWS setup, vocabularies, paste behavior and a sample dictation grooming profile.
+
+### install extras
+
+the base `kassette` package holds only settings, AWS credential resolution and the transcript grooming core. each surface installs its own extra:
+
+- `kassette[voice]` adds pipecat, webrtc, gemini, openai and fish for `kassette serve` and `kassette call`. the container image installs it.
+- `kassette[dictate]` adds `amazon-transcribe`, `sounddevice` and pyobjc for `kassette dictate`. it doesn't install pipecat, aiortc, av, google-genai, openai, httpx or typer, and every package it installs is MIT, MIT-0, BSD, Apache-2.0 or PSF licensed. ci checks that with `scripts/dictate_license_report.py`.
+
+running a voice command without `kassette[voice]` exits with a message that names the missing extra.
 
 ## hosted mode
 
@@ -208,6 +216,7 @@ the comparison requires `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID`, `FISH_API_K
 run the checks with:
 
 ```bash
+uv sync --all-extras --dev
 uv run pytest
 uv run ruff check .
 uv run ruff format --check .

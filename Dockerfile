@@ -14,10 +14,10 @@ COPY --from=uv /uv /uvx /bin/
 WORKDIR /app
 
 COPY pyproject.toml uv.lock README.md ./
-RUN uv sync --frozen --no-dev --no-install-project
+RUN uv sync --frozen --no-dev --extra voice --no-install-project
 
 COPY src ./src
-RUN uv sync --frozen --no-dev --no-editable
+RUN uv sync --frozen --no-dev --extra voice --no-editable
 
 FROM python:3.12.13-slim-bookworm AS runtime
 
