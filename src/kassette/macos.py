@@ -23,6 +23,7 @@ from kassette.hotkey import COMMAND_MASK, Hotkey
 _V_KEYCODE = 9
 _PASTE_EVENT_TAG = 0x4B41535345545445  # "KASSETTE" in the event's user data.
 _MIC_PROMPT_TIMEOUT_SECS = 120.0
+_HOTKEY_START_TIMEOUT_SECS = 10.0
 _PERMISSION_PATH = "System Settings → Privacy & Security"
 
 
@@ -137,8 +138,7 @@ class MacHotkeyListener:
 
     def start(self) -> None:
         self._thread.start()
-        self._ready.wait()
-        if self._failed:
+        if not self._ready.wait(_HOTKEY_START_TIMEOUT_SECS) or self._failed:
             raise PermissionDeniedError(
                 "the global hotkey can't be installed. allow this terminal under "
                 f"{_PERMISSION_PATH} → Accessibility (and Input Monitoring if macOS "
@@ -151,6 +151,14 @@ class MacHotkeyListener:
         self._thread.join(timeout=2)
 
     def _run(self) -> None:
+        try:
+            self._install_tap_and_run()
+        finally:
+            if not self._ready.is_set():
+                self._failed = True
+                self._ready.set()
+
+    def _install_tap_and_run(self) -> None:
         mask = Quartz.CGEventMaskBit(Quartz.kCGEventKeyDown) | Quartz.CGEventMaskBit(
             Quartz.kCGEventKeyUp
         )

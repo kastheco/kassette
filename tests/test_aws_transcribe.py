@@ -4,6 +4,7 @@ import asyncio
 import binascii
 import json
 import struct
+import threading
 from collections.abc import AsyncGenerator, Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -267,6 +268,7 @@ class FakeTranscribe:
     audio_bytes: int = 0
     ended: bool = False
     audio_after_end: int = 0
+    request_queries: list[dict[str, str]] = field(default_factory=list[dict[str, str]], repr=False)
     server: Server | None = field(default=None, repr=False)
 
     @property
@@ -285,6 +287,8 @@ class FakeTranscribe:
 
     async def _handle(self, connection: ServerConnection) -> None:
         self.connections += 1
+        assert connection.request is not None
+        self.request_queries.append(dict(parse_qsl(urlsplit(connection.request.path).query)))
         sent_partial = False
         async for message in connection:
             assert isinstance(message, bytes)
@@ -377,8 +381,43 @@ async def test_recording_waits_for_finals_after_end_of_stream(
 
 async def test_cascade_pause_drains_finals_and_resume_reconnects(
     fake_transcribe: FakeTranscribe,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    stt = _aws_stt(_settings())
+    loop_thread = threading.get_ident()
+    credentials = AWSTranscribeCredentials(ACCESS_KEY, SECRET_KEY, "first-session", "us-east-1")
+
+    def resolve(_settings: KassetteSettings) -> AWSTranscribeCredentials:
+        assert threading.get_ident() != loop_thread
+        return credentials
+
+    def local_signed_url(
+        credentials: AWSTranscribeCredentials,
+        *,
+        language_code: str,
+        sample_rate: int,
+        vocabulary_name: str | None,
+        vocabulary_filter_name: str | None,
+    ) -> str:
+        signed = urlsplit(
+            transcribe_stream_url(
+                credentials,
+                language_code=language_code,
+                sample_rate=sample_rate,
+                vocabulary_name=vocabulary_name,
+                vocabulary_filter_name=vocabulary_filter_name,
+            )
+        )
+        local = urlsplit(fake_transcribe.url)
+        return signed._replace(scheme=local.scheme, netloc=local.netloc).geturl()
+
+    monkeypatch.setattr(KassetteSettings, "aws_transcription_credentials", resolve)
+    monkeypatch.setattr(aws_transcribe, "transcribe_stream_url", local_signed_url)
+    service = build_cascade_stt(
+        _settings(KASSETTE_TRANSCRIPTION_PROVIDER="aws"),
+        AWSTranscribeCredentials(ACCESS_KEY, SECRET_KEY, "expired-session", "us-east-1"),
+    )
+    assert isinstance(service, PausableAWSTranscribeSTTService)
+    stt = service
     collector = DictationTranscriptCollector()
     worker = PipelineWorker(
         Pipeline([_SilentMicrophone(), stt, collector]),
@@ -394,10 +433,17 @@ async def test_cascade_pause_drains_finals_and_resume_reconnects(
         await worker.flush_pipeline(timeout=2)
         assert collector.transcript() == "um so the jepp release ships on friday."
         assert not stt.connected
+        assert fake_transcribe.request_queries[0]["X-Amz-Security-Token"] == "first-session"
+        credentials = AWSTranscribeCredentials(
+            "AKIDREFRESHED", SECRET_KEY, "refreshed-session", "us-east-1"
+        )
 
         await stt.resume_input()
         assert stt.connected
         assert fake_transcribe.connections == 2
+        resumed_query = fake_transcribe.request_queries[1]
+        assert resumed_query["X-Amz-Security-Token"] == "refreshed-session"
+        assert resumed_query["X-Amz-Credential"].startswith("AKIDREFRESHED/")
     finally:
         await worker.cancel()
         await asyncio.wait_for(run_task, 5)

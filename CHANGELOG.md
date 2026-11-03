@@ -12,6 +12,8 @@
 
 - dictation's generated Cmd-V events reach the focused app even when `cmd+v` is the hotkey
 - clipboard restoration runs when shutdown interrupts paste settling, without overwriting a newer copy
+- global hotkey startup reports failure when setup exits early or takes longer than ten seconds
+- resumed AWS cascade streams resolve fresh credentials without blocking the event loop
 
 ### security
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from typing import cast
 
 from botocore.auth import SigV4QueryAuth
@@ -75,6 +75,7 @@ class PausableAWSTranscribeSTTService(AWSTranscribeSTTService):
         self,
         *,
         credentials: AWSTranscribeCredentials,
+        credentials_resolver: Callable[[], AWSTranscribeCredentials] | None = None,
         vocabulary_name: str | None = None,
         vocabulary_filter_name: str | None = None,
         sample_rate: int = TRANSCRIBE_SAMPLE_RATE,
@@ -87,6 +88,7 @@ class PausableAWSTranscribeSTTService(AWSTranscribeSTTService):
             sample_rate=sample_rate,
         )
         self._aws_credentials = credentials
+        self._credentials_resolver = credentials_resolver
         self._vocabulary_name = vocabulary_name
         self._vocabulary_filter_name = vocabulary_filter_name
         self._input_finished = False
@@ -177,8 +179,13 @@ class PausableAWSTranscribeSTTService(AWSTranscribeSTTService):
             websocket = self._socket()
             if websocket is not None and websocket.state is State.OPEN:
                 return
+            credentials = (
+                await asyncio.to_thread(self._credentials_resolver)
+                if self._credentials_resolver is not None
+                else self._aws_credentials
+            )
             url = transcribe_stream_url(
-                self._aws_credentials,
+                credentials,
                 language_code=str(assert_given(self._settings.language)),
                 sample_rate=TRANSCRIBE_SAMPLE_RATE,
                 vocabulary_name=self._vocabulary_name,

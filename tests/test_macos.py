@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+import threading
 from types import ModuleType
 from unittest.mock import Mock
 
@@ -73,3 +74,78 @@ def test_own_paste_bypasses_cmd_v_hotkey_without_releasing_physical_key(macos: M
     assert listener._handle(None, quartz.kCGEventKeyUp, physical, None) is None
     assert listener._handle(None, quartz.kCGEventKeyDown, physical, None) is None
     assert presses == [True, True]
+
+
+@pytest.mark.parametrize("outcome", ["installed", "denied", "exception"])
+def test_hotkey_startup_signals_success_or_failure(macos: ModuleType, outcome: str) -> None:
+    quartz = macos.Quartz
+
+    def event_mask(kind: int) -> int:
+        return 1 << kind
+
+    quartz.CGEventMaskBit.side_effect = event_mask
+    if outcome == "denied":
+        quartz.CGEventTapCreate.return_value = None
+    elif outcome == "exception":
+        quartz.CFMachPortCreateRunLoopSource.side_effect = RuntimeError("tap setup failed")
+    listener = macos.MacHotkeyListener(parse_hotkey("cmd+d"), lambda: None)
+    errors: list[Exception] = []
+
+    def run() -> None:
+        try:
+            listener._run()
+        except Exception as error:
+            errors.append(error)
+
+    listener._thread = threading.Thread(target=run)
+    caller_errors: list[Exception] = []
+
+    def start() -> None:
+        try:
+            listener.start()
+        except Exception as error:
+            caller_errors.append(error)
+
+    caller = threading.Thread(target=start, daemon=True)
+    caller.start()
+    caller.join(timeout=1)
+    hung = caller.is_alive()
+    if hung:
+        listener._ready.set()
+        caller.join(timeout=1)
+    listener.stop()
+    assert not hung, "hotkey startup hung after setup exited"
+    if outcome == "installed":
+        assert caller_errors == []
+    else:
+        assert len(caller_errors) == 1
+        assert isinstance(caller_errors[0], macos.PermissionDeniedError)
+    assert bool(errors) == (outcome == "exception")
+
+
+def test_hotkey_startup_times_out_when_setup_stalls(
+    macos: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(macos, "_HOTKEY_START_TIMEOUT_SECS", 0.01, raising=False)
+    release = threading.Event()
+    listener = macos.MacHotkeyListener(parse_hotkey("cmd+d"), lambda: None)
+    listener._thread = threading.Thread(target=release.wait)
+    errors: list[Exception] = []
+
+    def start() -> None:
+        try:
+            listener.start()
+        except Exception as error:
+            errors.append(error)
+
+    caller = threading.Thread(target=start, daemon=True)
+    caller.start()
+    caller.join(timeout=1)
+    hung = caller.is_alive()
+    release.set()
+    listener._ready.set()
+    caller.join(timeout=1)
+    listener.stop()
+    assert not hung, "hotkey startup did not time out"
+    assert len(errors) == 1
+    assert isinstance(errors[0], macos.PermissionDeniedError)

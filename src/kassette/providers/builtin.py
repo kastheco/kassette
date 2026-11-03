@@ -152,6 +152,7 @@ def build_cascade_stt(
             raise TypeError("AWS transcription requires resolved AWS credentials")
         return PausableAWSTranscribeSTTService(
             credentials=credential,
+            credentials_resolver=settings.aws_transcription_credentials,
             vocabulary_name=settings.aws_vocabulary_name,
             vocabulary_filter_name=settings.aws_vocabulary_filter_name,
         )
