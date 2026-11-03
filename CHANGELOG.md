@@ -1,5 +1,18 @@
 # changelog
 
+## unreleased
+
+### added
+
+- `aws` transcription provider using AWS Transcribe streaming, with credentials from the standard AWS chain, an optional region, and an optional custom vocabulary and vocabulary filter applied with `remove`
+- `kassette dictate`, a macos toggle dictation mode: one global hotkey starts and stops recording, then kassette waits for the final AWS transcript, grooms it and pastes it at the cursor while preserving the clipboard
+- dictation docs covering portaudio, Microphone and Accessibility permissions, AWS setup and a sample dictation grooming profile
+
+### security
+
+- AWS credentials, presigned stream URLs and transcript text stay out of logs and status output
+- dictation keeps audio and transcripts off disk
+
 ## 0.2.0
 
 ### added

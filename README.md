@@ -38,6 +38,18 @@ local mode binds to `127.0.0.1:7860` by default. both `serve` and `call` continu
 
 message playback uses `POST /api/tts` on the same local service. the endpoint accepts `{ "text": "..." }`, returns mono 24 khz wav audio, and keeps a small process-local content cache. product clients should keep their own refresh-scoped audio cache so replay doesn't call the provider again.
 
+### macos toggle dictation
+
+`kassette dictate` turns a global hotkey into fast dictation on macos. press it once to start, speak, and press it again. kassette streams to AWS Transcribe, waits for the final transcript, grooms it and pastes it at the cursor in the focused app. it runs as its own local process, outside the webrtc service.
+
+```bash
+brew install portaudio
+uv sync --locked
+KASSETTE_TRANSCRIPTION_PROVIDER=aws AWS_PROFILE=personal uv run kassette dictate
+```
+
+the default hotkey is `ctrl+option+d`. the terminal app needs Microphone and Accessibility access. audio and transcripts stay off disk, and status output leaves transcript text out. see [docs/dictation.md](docs/dictation.md) for permissions, AWS setup, vocabularies, paste behavior and a sample dictation grooming profile.
+
 ## hosted mode
 
 hosted mode is an explicit server contract for a private backend deployment. it binds to `0.0.0.0` and reads Railway's `PORT`:
@@ -101,8 +113,12 @@ an image-based Railway service may instead pin `ghcr.io/kastheco/kassette:<versi
 | `OPENAI_API_KEY` | both | required when cascade transcription uses OpenAI | provider credential, never used as service auth |
 | `FISH_API_KEY` | both | required for Fish Audio TTS | provider credential, never used as service auth |
 | `FISH_MODEL`, `FISH_VOICE_ID` | both | optional | Fish Audio model and voice selection |
-| `KASSETTE_TRANSCRIPTION_PROVIDER` | both | optional, defaults to `gemini` | selects cascade STT provider |
+| `KASSETTE_TRANSCRIPTION_PROVIDER` | both | optional, defaults to `gemini` | selects cascade STT provider: `gemini`, `openai`, or `aws` |
 | `KASSETTE_OPENAI_TRANSCRIPTION_MODEL` | both | optional | OpenAI transcription model |
+| `AWS_PROFILE`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` | both | required when transcription uses AWS | standard AWS credential chain, never logged |
+| `KASSETTE_AWS_REGION` | both | optional, defaults to the AWS chain, then `us-east-1` | AWS Transcribe streaming region |
+| `KASSETTE_AWS_VOCABULARY_NAME`, `KASSETTE_AWS_VOCABULARY_FILTER_NAME` | both | optional | AWS custom vocabulary and vocabulary filter, applied with `remove` |
+| `KASSETTE_DICTATE_HOTKEY` | dictate | optional, defaults to `ctrl+option+d` | `kassette dictate` toggle hotkey |
 | `KASSETTE_GEMINI_LIVE_MODEL`, `KASSETTE_GEMINI_LIVE_THINKING_LEVEL` | both | optional | delegated Gemini Live configuration |
 | `KASSETTE_VAD_STOP_SECS`, `KASSETTE_VAD_MIN_VOLUME` | both | optional | voice activity thresholds |
 | `KASSETTE_TRANSCRIPT_GROOMING_PROFILE`, `KASSETTE_TRANSCRIPT_GROOMING_TIMEOUT_SECS` | both | optional | external transcript grooming profile and timeout |
@@ -213,7 +229,8 @@ implemented:
 - managed STUN/TURN configuration through Pipecat's supported ICE surface
 - non-root locked container packaging and bounded `/healthz`
 - loopback terminal sessions with service-owned local audio and the pi voice surface
-- selectable gemini 3.5 transcribe live or openai gpt live transcribe stt
+- selectable gemini 3.5 transcribe live, openai gpt live transcribe, or AWS Transcribe streaming stt
+- macos toggle dictation that pastes groomed final transcripts at the cursor
 - provider-neutral provisional and final transcript events
 - optional deterministic transcript grooming through external profiles
 - fish audio streaming tts for agent responses

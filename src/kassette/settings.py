@@ -5,9 +5,14 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from kassette.aws_credentials import (
+    AWSTranscribeCredentials,
+    resolve_aws_transcribe_credentials,
+)
+from kassette.hotkey import Hotkey, parse_hotkey
 from kassette.sessions import AudioLeasePolicy, SessionConcurrencyPolicy
 
 
@@ -77,9 +82,33 @@ class KassetteSettings(BaseSettings):
         le=10,
         validation_alias="KASSETTE_TRANSCRIPT_GROOMING_TIMEOUT_SECS",
     )
-    transcription_provider: Literal["gemini", "openai"] = Field(
+    transcription_provider: Literal["gemini", "openai", "aws"] = Field(
         default="gemini",
         validation_alias="KASSETTE_TRANSCRIPTION_PROVIDER",
+    )
+    aws_region: str | None = Field(
+        default=None,
+        pattern=r"^[a-z]{2}(-[a-z]+)+-\d+$",
+        validation_alias="KASSETTE_AWS_REGION",
+    )
+    aws_vocabulary_name: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=200,
+        pattern=r"^[0-9A-Za-z._-]+$",
+        validation_alias="KASSETTE_AWS_VOCABULARY_NAME",
+    )
+    aws_vocabulary_filter_name: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=200,
+        pattern=r"^[0-9A-Za-z._-]+$",
+        validation_alias="KASSETTE_AWS_VOCABULARY_FILTER_NAME",
+    )
+    dictate_hotkey: str = Field(
+        default="ctrl+option+d",
+        min_length=1,
+        validation_alias="KASSETTE_DICTATE_HOTKEY",
     )
     google_api_key: SecretStr | None = Field(
         default=None,
@@ -137,6 +166,16 @@ class KassetteSettings(BaseSettings):
         validation_alias="ELEVENLABS_VOICE_ID",
     )
 
+    @field_validator("dictate_hotkey")
+    @classmethod
+    def validate_dictate_hotkey(cls, value: str) -> str:
+        parse_hotkey(value)
+        return value
+
+    @property
+    def dictation_hotkey(self) -> Hotkey:
+        return parse_hotkey(self.dictate_hotkey)
+
     @property
     def hosted(self) -> bool:
         return self.runtime_mode == "hosted"
@@ -165,15 +204,21 @@ class KassetteSettings(BaseSettings):
             raise RuntimeError("GOOGLE_API_KEY is required for Gemini transcription")
         return self.google_api_key.get_secret_value()
 
-    def transcription_credential(self) -> str:
-        """Return the selected cascade transcription provider's secret."""
+    def aws_transcription_credentials(self) -> AWSTranscribeCredentials:
+        """Resolve AWS credentials from the standard chain for Transcribe streaming."""
+        return resolve_aws_transcribe_credentials(region=self.aws_region)
+
+    def transcription_credential(self) -> str | AWSTranscribeCredentials:
+        """Return the selected cascade transcription provider's credential."""
         if self.transcription_provider == "gemini":
             return self.google_transcription_credential()
+        if self.transcription_provider == "aws":
+            return self.aws_transcription_credentials()
         if self.openai_api_key is None:
             raise RuntimeError("OPENAI_API_KEY is required for OpenAI transcription")
         return self.openai_api_key.get_secret_value()
 
-    def cascade_credentials(self) -> tuple[str, str]:
+    def cascade_credentials(self) -> tuple[str | AWSTranscribeCredentials, str]:
         """Return provider secrets only when the cascaded backend needs them."""
         return self.transcription_credential(), self.fish_credential()
 

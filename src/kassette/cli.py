@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 import webbrowser
-from typing import Annotated
+from typing import Annotated, NoReturn
 from urllib.parse import urlsplit
 
 import typer
+from loguru import logger
 from pydantic import ValidationError
 
 from kassette.hosted import HostedConfigurationError, HostedRuntimeConfiguration
@@ -146,3 +148,61 @@ def call(
     typer.echo(f"Opening kassette voice client at {url}")
     if not webbrowser.open(url):
         raise typer.Exit(code=1)
+
+
+@app.command()
+def dictate(
+    hotkey: Annotated[
+        str | None,
+        typer.Option(
+            help="Toggle hotkey, such as ctrl+option+d. Overrides KASSETTE_DICTATE_HOTKEY."
+        ),
+    ] = None,
+) -> None:
+    """Toggle macOS dictation with a global hotkey and paste the groomed transcript."""
+    if sys.platform != "darwin":
+        _fail("kassette dictate requires macOS")
+    if hotkey is not None:
+        os.environ["KASSETTE_DICTATE_HOTKEY"] = hotkey
+    try:
+        settings = load_settings()
+    except ValidationError as error:
+        _fail(f"invalid configuration: {_validation_summary(error)}")
+
+    from kassette.dictation import DictationError, run_dictation, validate_dictation_settings
+
+    try:
+        groomer = validate_dictation_settings(settings)
+        from kassette import macos
+
+        macos.require_microphone()
+        macos.require_accessibility()
+        platform = macos.MacDictationPlatform()
+    except DictationError as error:
+        _fail(str(error))
+
+    # Normal logs leave transcript text out. Keep provider debug output off the terminal.
+    logger.remove()
+    logger.add(sys.stderr, level="WARNING")
+
+    def notify(message: str) -> None:
+        typer.echo(f"kassette dictate: {message}", err=True)
+
+    try:
+        asyncio.run(run_dictation(settings, groomer, platform=platform, notify=notify))
+    except KeyboardInterrupt:
+        pass
+    except DictationError as error:
+        _fail(str(error))
+
+
+def _fail(message: str) -> NoReturn:
+    typer.echo(f"kassette dictate: {message}", err=True)
+    raise typer.Exit(code=1)
+
+
+def _validation_summary(error: ValidationError) -> str:
+    """Name invalid fields and reasons without echoing configured values."""
+    return "; ".join(
+        f"{'.'.join(str(part) for part in item['loc'])}: {item['msg']}" for item in error.errors()
+    )

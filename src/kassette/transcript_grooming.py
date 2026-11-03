@@ -289,48 +289,61 @@ class TranscriptGroomingProcessor(FrameProcessor):
         self,
         frame: InterimTranscriptionFrame | TranscriptionFrame,
     ) -> None:
-        started = perf_counter()
-        final = isinstance(frame, TranscriptionFrame)
-        request = TranscriptGroomingRequest(
-            text=frame.text,
-            final=final,
-            language=str(frame.language) if frame.language is not None else None,
+        frame.text = await groom_transcript(
+            self._groomer,
+            TranscriptGroomingRequest(
+                text=frame.text,
+                final=isinstance(frame, TranscriptionFrame),
+                language=str(frame.language) if frame.language is not None else None,
+            ),
+            timeout_secs=self._timeout_secs,
         )
-        try:
-            async with asyncio.timeout(self._timeout_secs):
-                result = await self._groomer.groom(request)
-        except TimeoutError:
-            logger.warning(
-                "transcript grooming timed out adapter={} final={} timeout_ms={}",
-                self._groomer.name,
-                final,
-                round(self._timeout_secs * 1_000),
-            )
-            return
-        except Exception as error:
-            logger.warning(
-                "transcript grooming failed adapter={} final={} error_type={}",
-                self._groomer.name,
-                final,
-                type(error).__name__,
-            )
-            return
-        if frame.text.strip() and not result.text.strip():
-            logger.warning(
-                "transcript grooming returned empty text; preserving provider transcript "
-                "adapter={} final={}",
-                result.adapter,
-                final,
-            )
-            return
-        frame.text = result.text
-        logger.debug(
-            "transcript grooming complete adapter={} final={} changed={} elapsed_ms={}",
+
+
+async def groom_transcript(
+    groomer: TranscriptGroomer,
+    request: TranscriptGroomingRequest,
+    *,
+    timeout_secs: float,
+) -> str:
+    """Groom one transcript, failing open to the provider text. Never logs text."""
+    started = perf_counter()
+    final = request.final
+    try:
+        async with asyncio.timeout(timeout_secs):
+            result = await groomer.groom(request)
+    except TimeoutError:
+        logger.warning(
+            "transcript grooming timed out adapter={} final={} timeout_ms={}",
+            groomer.name,
+            final,
+            round(timeout_secs * 1_000),
+        )
+        return request.text
+    except Exception as error:
+        logger.warning(
+            "transcript grooming failed adapter={} final={} error_type={}",
+            groomer.name,
+            final,
+            type(error).__name__,
+        )
+        return request.text
+    if request.text.strip() and not result.text.strip():
+        logger.warning(
+            "transcript grooming returned empty text; preserving provider transcript "
+            "adapter={} final={}",
             result.adapter,
             final,
-            result.changed,
-            round((perf_counter() - started) * 1_000, 2),
         )
+        return request.text
+    logger.debug(
+        "transcript grooming complete adapter={} final={} changed={} elapsed_ms={}",
+        result.adapter,
+        final,
+        result.changed,
+        round((perf_counter() - started) * 1_000, 2),
+    )
+    return result.text
 
 
 def profile_schema() -> dict[str, Any]:
