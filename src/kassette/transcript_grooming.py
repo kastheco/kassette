@@ -1,4 +1,4 @@
-"""Pluggable transcript grooming for cascaded voice sessions."""
+"""Pipecat-free transcript grooming core: profile model, rules, and the fail-open seam."""
 
 from __future__ import annotations
 
@@ -10,8 +10,6 @@ from time import perf_counter
 from typing import Any, Literal, Protocol
 
 from loguru import logger
-from pipecat.frames.frames import Frame, InterimTranscriptionFrame, TranscriptionFrame
-from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from kassette.filler_filter import filter_filler_words
@@ -256,81 +254,50 @@ def load_transcript_groomer(profile_path: Path | None) -> TranscriptGroomer:
     return RuleTranscriptGroomer(profile)
 
 
-class TranscriptGroomingProcessor(FrameProcessor):
-    """Apply a groomer after STT and before normalized transcript events."""
-
-    def __init__(
-        self,
-        groomer: TranscriptGroomer,
-        *,
-        timeout_secs: float = 0.5,
-        name: str | None = None,
-        enable_direct_mode: bool = False,
-    ) -> None:
-        if timeout_secs <= 0:
-            raise ValueError("timeout_secs must be positive")
-        super().__init__(  # pyright: ignore[reportUnknownMemberType]
-            name=name,
-            enable_direct_mode=enable_direct_mode,
+async def groom_transcript(
+    groomer: TranscriptGroomer,
+    request: TranscriptGroomingRequest,
+    *,
+    timeout_secs: float,
+) -> str:
+    """Groom one transcript, failing open to the provider text. Never logs text."""
+    started = perf_counter()
+    final = request.final
+    try:
+        async with asyncio.timeout(timeout_secs):
+            result = await groomer.groom(request)
+    except TimeoutError:
+        logger.warning(
+            "transcript grooming timed out adapter={} final={} timeout_ms={}",
+            groomer.name,
+            final,
+            round(timeout_secs * 1_000),
         )
-        self._groomer = groomer
-        self._timeout_secs = timeout_secs
-
-    async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
-        await super().process_frame(frame, direction)
-        if direction is FrameDirection.DOWNSTREAM and isinstance(
-            frame,
-            (InterimTranscriptionFrame, TranscriptionFrame),
-        ):
-            await self._groom_frame(frame)
-        await self.push_frame(frame, direction)
-
-    async def _groom_frame(
-        self,
-        frame: InterimTranscriptionFrame | TranscriptionFrame,
-    ) -> None:
-        started = perf_counter()
-        final = isinstance(frame, TranscriptionFrame)
-        request = TranscriptGroomingRequest(
-            text=frame.text,
-            final=final,
-            language=str(frame.language) if frame.language is not None else None,
+        return request.text
+    except Exception as error:
+        logger.warning(
+            "transcript grooming failed adapter={} final={} error_type={}",
+            groomer.name,
+            final,
+            type(error).__name__,
         )
-        try:
-            async with asyncio.timeout(self._timeout_secs):
-                result = await self._groomer.groom(request)
-        except TimeoutError:
-            logger.warning(
-                "transcript grooming timed out adapter={} final={} timeout_ms={}",
-                self._groomer.name,
-                final,
-                round(self._timeout_secs * 1_000),
-            )
-            return
-        except Exception as error:
-            logger.warning(
-                "transcript grooming failed adapter={} final={} error_type={}",
-                self._groomer.name,
-                final,
-                type(error).__name__,
-            )
-            return
-        if frame.text.strip() and not result.text.strip():
-            logger.warning(
-                "transcript grooming returned empty text; preserving provider transcript "
-                "adapter={} final={}",
-                result.adapter,
-                final,
-            )
-            return
-        frame.text = result.text
-        logger.debug(
-            "transcript grooming complete adapter={} final={} changed={} elapsed_ms={}",
+        return request.text
+    if request.text.strip() and not result.text.strip():
+        logger.warning(
+            "transcript grooming returned empty text; preserving provider transcript "
+            "adapter={} final={}",
             result.adapter,
             final,
-            result.changed,
-            round((perf_counter() - started) * 1_000, 2),
         )
+        return request.text
+    logger.debug(
+        "transcript grooming complete adapter={} final={} changed={} elapsed_ms={}",
+        result.adapter,
+        final,
+        result.changed,
+        round((perf_counter() - started) * 1_000, 2),
+    )
+    return result.text
 
 
 def profile_schema() -> dict[str, Any]:

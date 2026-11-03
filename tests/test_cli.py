@@ -4,7 +4,7 @@ import webbrowser
 from pytest import MonkeyPatch
 from typer.testing import CliRunner
 
-from kassette.cli import app
+from kassette.voice_cli import app
 
 runner = CliRunner()
 

@@ -6,8 +6,10 @@ import asyncio
 from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from dataclasses import dataclass, replace
 from enum import StrEnum
+from inspect import isawaitable
 from typing import Any, Protocol, cast
 
+from loguru import logger
 from pipecat.frames.frames import (
     CancelFrame,
     EndFrame,
@@ -124,7 +126,9 @@ class VoiceProviderAdapter(Protocol):
     async def close(self) -> None: ...
 
 
-VoiceProviderFactory = Callable[[VoiceProviderBuildContext], VoiceProviderAdapter]
+VoiceProviderFactory = Callable[
+    [VoiceProviderBuildContext], VoiceProviderAdapter | Awaitable[VoiceProviderAdapter]
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -279,6 +283,7 @@ class VoiceProviderRuntime(FrameProcessor):
         self._ready_generation: int | None = None
         self._ready_event: asyncio.Event | None = None
         self._ready_error: str | None = None
+        self._pending_builds: set[asyncio.Task[VoiceProviderAdapter]] = set()
 
     async def setup(self, setup: FrameProcessorSetup) -> None:
         await super().setup(setup)
@@ -445,7 +450,9 @@ class VoiceProviderRuntime(FrameProcessor):
             try:
                 await previous_adapter.close()
                 failure_reason = "provider_start_failed"
-                candidate = self._build_adapter(provider_id, switch_snapshot.provider_generation)
+                candidate = await self._build_adapter(
+                    provider_id, switch_snapshot.provider_generation
+                )
                 failed_adapter = candidate
                 await candidate.setup(self._provider_setup)
                 active_snapshot = await self._registry.activate_provider(
@@ -490,6 +497,8 @@ class VoiceProviderRuntime(FrameProcessor):
             )
 
     async def _start_initial_provider(self, frame: StartFrame) -> None:
+        if self._closed:
+            return
         definition = self._providers.resolve(self._provider_id)
         if definition is None:
             raise RuntimeError("initial voice provider disappeared from registry")
@@ -497,9 +506,14 @@ class VoiceProviderRuntime(FrameProcessor):
             await self._fail_session("credentials_unavailable")
             raise RuntimeError("initial voice provider credentials are unavailable")
         try:
-            adapter = self._build_adapter(self._provider_id, self._provider_generation)
-            await adapter.setup(self._provider_setup)
+            adapter = await self._build_adapter(self._provider_id, self._provider_generation)
+            if self._closed:
+                await adapter.close()
+                return
             self._adapter = adapter
+            await adapter.setup(self._provider_setup)
+            if self._closed:
+                return
             await self._start_adapter(adapter, frame, self._provider_generation)
         except BaseException:
             if self._adapter is not None:
@@ -539,7 +553,9 @@ class VoiceProviderRuntime(FrameProcessor):
                 self._ready_event = None
                 self._ready_error = None
 
-    def _build_adapter(self, provider_id: str, provider_generation: int) -> VoiceProviderAdapter:
+    async def _build_adapter(
+        self, provider_id: str, provider_generation: int
+    ) -> VoiceProviderAdapter:
         definition = self._providers.resolve(provider_id)
         if definition is None:
             raise RuntimeError("voice provider disappeared from registry")
@@ -554,7 +570,7 @@ class VoiceProviderRuntime(FrameProcessor):
                 provider_generation,
             )
 
-        return definition.factory(
+        adapter = definition.factory(
             VoiceProviderBuildContext(
                 session_id=self._session_id,
                 session_generation=self._session_generation,
@@ -563,6 +579,42 @@ class VoiceProviderRuntime(FrameProcessor):
                 frame_sink=forward,
             )
         )
+        if not isawaitable(adapter):
+            return adapter
+
+        abandoned = False
+        claimed = False
+
+        async def construct() -> VoiceProviderAdapter:
+            result = await adapter
+            if abandoned:
+                await result.close()
+                raise asyncio.CancelledError
+            return result
+
+        def finished(task: asyncio.Task[VoiceProviderAdapter]) -> None:
+            self._pending_builds.discard(task)
+            if not task.cancelled() and task.exception() is not None and abandoned:
+                logger.error("abandoned voice provider construction failed")
+
+        # wait_for waits for cancellation, so a factory suppressing cancellation
+        # could hold the switch lock past the deadline. Own and drain it separately.
+        task = asyncio.create_task(construct())
+        self._pending_builds.add(task)
+        task.add_done_callback(finished)
+        try:
+            done, _ = await asyncio.wait({task}, timeout=self._provider_ready_timeout_secs)
+            if task in done:
+                claimed = True
+                return task.result()
+            raise TimeoutError("voice provider construction timed out")
+        finally:
+            if not claimed:
+                abandoned = True
+                if not task.done():
+                    task.cancel()
+                elif not task.cancelled() and task.exception() is None:
+                    await task.result().close()
 
     async def _collect_provider_event(
         self,
@@ -680,7 +732,7 @@ class VoiceProviderRuntime(FrameProcessor):
             metadata={"reason": reason},
             error_code=reason,
         )
-        if previous_provider is None:
+        if previous_provider is None or self._closed:
             await self._fail_session("provider_switch_failed")
             snapshot = await self._registry.get(self._session_id)
             return ProviderSwitchResult(
@@ -699,7 +751,7 @@ class VoiceProviderRuntime(FrameProcessor):
         self._provider_generation = recovery.provider_generation
         await self._publish_state(recovery.state)
         try:
-            adapter = self._build_adapter(previous_provider, recovery.provider_generation)
+            adapter = await self._build_adapter(previous_provider, recovery.provider_generation)
             await adapter.setup(self._provider_setup)
             active_snapshot = await self._registry.activate_provider(
                 self._session_id,
@@ -915,7 +967,10 @@ class VoiceProviderRuntime(FrameProcessor):
             if self._closed:
                 return
             self._closed = True
-            adapter = self._adapter
-            self._adapter = None
-            if adapter is not None:
-                await adapter.close()
+            async with self._switch_lock:
+                adapter = self._adapter
+                self._adapter = None
+                if adapter is not None:
+                    await adapter.close()
+                if self._pending_builds:
+                    await asyncio.gather(*self._pending_builds, return_exceptions=True)

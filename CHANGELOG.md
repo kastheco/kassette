@@ -1,5 +1,42 @@
 # changelog
 
+## unreleased
+
+### added
+
+- `aws` transcription provider using AWS Transcribe streaming, with credentials from the standard AWS chain, an optional region, and an optional custom vocabulary and vocabulary filter applied with `remove`
+- `kassette dictate`, a macos toggle dictation mode: one global hotkey starts and stops recording, then kassette waits for the final AWS transcript, grooms it and pastes it at the cursor while preserving the clipboard. it talks to AWS Transcribe through `amazon-transcribe` and records with `sounddevice`, without pipecat
+- dictation docs covering Microphone and Accessibility permissions, AWS setup and a sample dictation grooming profile
+- ci license report for `kassette[dictate]`, which fails on any license outside MIT, MIT-0, BSD, Apache-2.0 and PSF and on any voice-stack package
+
+### changed
+
+- **breaking for installs:** pipecat, aiortc, av, google-genai, aiohttp and typer moved from the base dependencies to a `voice` extra. install `kassette[voice]` (or `uv sync --extra voice`) for `kassette serve` and `kassette call`. the container image installs it. `kassette dictate` needs only the new `dictate` extra
+- `kassette.transcript_grooming` is now pipecat-free. `TranscriptGroomingProcessor` moved to `kassette.transcript_grooming_processor`
+- the `kassette` entry point dispatches `dictate` to an argparse command and every other command to the typer app, so neither extra imports the other's dependencies
+
+### fixed
+
+- `kassette dictate` reports missing `dictate` dependencies and the install command before checking configuration or importing macOS adapters
+- dictation's generated Cmd-V events reach the focused app even when `cmd+v` is the hotkey
+- clipboard restoration runs when shutdown interrupts paste settling, without overwriting a newer copy
+- global hotkey startup reports failure when setup exits early or takes longer than ten seconds
+- resumed AWS cascade streams resolve fresh credentials without blocking the event loop
+- initial AWS cascade startup resolves credentials off the event loop before building the provider pipeline
+- provider construction uses the configured readiness timeout during startup, switches and rollback, and late adapter results are closed
+- runtime cleanup waits for pending provider construction and prevents initial adapters from starting after shutdown
+- AWS cascade resume stays paused after a failed reconnect so a later resume can retry
+- dictation drains audio callbacks queued before capture stops, preserving the last recorded words
+- AWS streaming websocket URLs use the China partition's DNS suffix for `cn-` regions
+- the dictate license report respects parentheses and `AND` precedence over `OR`, and rejects malformed expressions
+- the dictate license report treats a `License-Expression` as authoritative, so a permissive legacy license or classifier can't override a rejected expression
+- dictation stops capture and reports the error as soon as the AWS stream fails or closes during a recording, instead of waiting for the stop toggle
+
+### security
+
+- AWS credentials, presigned stream URLs and transcript text stay out of logs and status output
+- dictation keeps audio and transcripts off disk
+
 ## 0.2.0
 
 ### added

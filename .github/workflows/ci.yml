@@ -35,7 +35,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install --yes portaudio19-dev
 
       - name: Install dependencies
-        run: uv sync --locked --dev
+        run: uv sync --locked --dev --all-extras
 
       - name: Run tests
         run: uv run pytest
@@ -48,6 +48,26 @@ jobs:
 
       - name: Run Pyright
         run: uv run pyright
+
+  dictate-licenses:
+    name: dictate extra license report
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: check out repository
+        uses: actions/checkout@v4
+
+      - name: install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: install kassette[dictate] for macOS into a clean target
+        run: >-
+          uv pip install --target "$RUNNER_TEMP/dictate"
+          --python-platform aarch64-apple-darwin --python-version 3.12 ".[dictate]"
+
+      - name: check licenses and the voice boundary
+        run: uv run --no-project --python 3.12 scripts/dictate_license_report.py "$RUNNER_TEMP/dictate"
 
   container:
     name: hosted container smoke

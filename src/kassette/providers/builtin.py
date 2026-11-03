@@ -14,7 +14,9 @@ from pipecat.services.fish.tts import FishAudioTTSService
 from pipecat.services.google.gemini_live.stt import GeminiSTTService
 from pipecat.services.openai.stt import OpenAIRealtimeSTTService
 
+from kassette.aws_credentials import AWSTranscribeCredentials
 from kassette.credentials import CodexCredentialProvider, PiAuthCredentialProvider
+from kassette.providers.aws_transcribe import PausableAWSTranscribeSTTService
 from kassette.providers.cascade import (
     CascadedBargeInProcessor,
     CascadedVoiceEvents,
@@ -34,10 +36,8 @@ from kassette.providers.runtime import (
 )
 from kassette.sessions import SessionRegistry
 from kassette.settings import KassetteSettings
-from kassette.transcript_grooming import (
-    TranscriptGroomingProcessor,
-    load_transcript_groomer,
-)
+from kassette.transcript_grooming import load_transcript_groomer
+from kassette.transcript_grooming_processor import TranscriptGroomingProcessor
 
 
 class PausableOpenAIRealtimeSTTService(OpenAIRealtimeSTTService):
@@ -142,18 +142,29 @@ class PausableGeminiSTTService(GeminiSTTService):
 
 def build_cascade_stt(
     settings: KassetteSettings,
-    api_key: str,
-) -> PausableGeminiSTTService | PausableOpenAIRealtimeSTTService:
+    credential: str | AWSTranscribeCredentials,
+) -> PausableGeminiSTTService | PausableOpenAIRealtimeSTTService | PausableAWSTranscribeSTTService:
     """Build the configured cascade transcription service."""
+    if settings.transcription_provider == "aws":
+        if not isinstance(credential, AWSTranscribeCredentials):
+            raise TypeError("AWS transcription requires resolved AWS credentials")
+        return PausableAWSTranscribeSTTService(
+            credentials=credential,
+            credentials_resolver=settings.aws_transcription_credentials,
+            vocabulary_name=settings.aws_vocabulary_name,
+            vocabulary_filter_name=settings.aws_vocabulary_filter_name,
+        )
+    if not isinstance(credential, str):
+        raise TypeError(f"{settings.transcription_provider} transcription requires an API key")
     if settings.transcription_provider == "openai":
         return PausableOpenAIRealtimeSTTService(
-            api_key=api_key,
+            api_key=credential,
             sample_rate=16_000,
             settings=OpenAIRealtimeSTTService.Settings(
                 model=settings.openai_transcription_model,
             ),
         )
-    return PausableGeminiSTTService(api_key=api_key, sample_rate=16_000)
+    return PausableGeminiSTTService(api_key=credential, sample_rate=16_000)
 
 
 def build_builtin_provider_registry(
@@ -167,16 +178,20 @@ def build_builtin_provider_registry(
     gemini_live_publish_client_events: bool = False,
 ) -> VoiceProviderRegistry:
     """Build the cascaded and native provider adapters behind one runtime registry."""
-    transcription_key_available = (
-        settings.google_api_key is not None
+    if settings.fish_api_key is None:
+        cascade_readiness = CredentialReadiness.MISSING
+    elif settings.transcription_provider == "aws":
+        # The AWS chain may refresh SSO or assume-role credentials, so it is
+        # resolved when the cascade starts rather than at registry build.
+        cascade_readiness = CredentialReadiness.UNKNOWN
+    elif (
+        settings.google_api_key
         if settings.transcription_provider == "gemini"
-        else settings.openai_api_key is not None
-    )
-    cascade_readiness = (
-        CredentialReadiness.READY
-        if transcription_key_available and settings.fish_api_key is not None
-        else CredentialReadiness.MISSING
-    )
+        else settings.openai_api_key
+    ) is not None:
+        cascade_readiness = CredentialReadiness.READY
+    else:
+        cascade_readiness = CredentialReadiness.MISSING
     quicksilver_credentials = credential_provider or PiAuthCredentialProvider()
     gemini_live_readiness = (
         CredentialReadiness.READY
@@ -184,8 +199,12 @@ def build_builtin_provider_registry(
         else CredentialReadiness.MISSING
     )
 
-    def build_cascade(context: VoiceProviderBuildContext) -> PipelineProviderAdapter:
-        transcription_api_key, fish_api_key = settings.cascade_credentials()
+    async def build_cascade(context: VoiceProviderBuildContext) -> PipelineProviderAdapter:
+        transcription_credential, fish_api_key = (
+            await asyncio.to_thread(settings.cascade_credentials)
+            if settings.transcription_provider == "aws"
+            else settings.cascade_credentials()
+        )
         vad = VADProcessor(
             vad_analyzer=SileroVADAnalyzer(
                 params=VADParams(
@@ -194,7 +213,7 @@ def build_builtin_provider_registry(
                 ),
             )
         )
-        stt = build_cascade_stt(settings, transcription_api_key)
+        stt = build_cascade_stt(settings, transcription_credential)
         grooming = TranscriptGroomingProcessor(
             load_transcript_groomer(settings.transcript_grooming_profile),
             timeout_secs=settings.transcript_grooming_timeout_secs,

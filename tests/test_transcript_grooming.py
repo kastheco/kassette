@@ -12,11 +12,11 @@ from kassette.transcript_grooming import (
     GroomedTranscript,
     NoOpTranscriptGroomer,
     RuleTranscriptGroomer,
-    TranscriptGroomingProcessor,
     TranscriptGroomingProfile,
     TranscriptGroomingRequest,
     load_transcript_groomer,
 )
+from kassette.transcript_grooming_processor import TranscriptGroomingProcessor
 
 
 class RecordingTranscriptGroomingProcessor(TranscriptGroomingProcessor):

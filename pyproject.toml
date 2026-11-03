@@ -5,20 +5,35 @@ description = "Local and hosted realtime voice infrastructure built on Pipecat."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+  "botocore==1.43.123",
+  "loguru==0.7.3",
+  "pydantic-settings==2.15.0",
+]
+
+[project.optional-dependencies]
+voice = [
   "aiohttp==3.14.3",
   "aiortc==1.15.0",
   "av==17.1.0",
   "google-genai>=2.9.0,<3",
   "pipecat-ai[fish,google,local,openai,runner,webrtc]==1.8.0",
-  "pydantic-settings==2.15.0",
   "typer==0.27.1",
+]
+dictate = [
+  "amazon-transcribe==0.6.4",
+  "sounddevice==0.5.6",
+  "pyobjc-framework-applicationservices==13.0 ; sys_platform == 'darwin'",
+  "pyobjc-framework-avfoundation==13.0 ; sys_platform == 'darwin'",
+  "pyobjc-framework-cocoa==13.0 ; sys_platform == 'darwin'",
+  "pyobjc-framework-quartz==13.0 ; sys_platform == 'darwin'",
 ]
 
 [project.scripts]
-kassette = "kassette.cli:app"
+kassette = "kassette.cli:main"
 
 [dependency-groups]
 dev = [
+  "botocore-stubs==1.43.123",
   "pyright==1.1.408",
   "pytest==9.0.2",
   "pytest-asyncio==1.3.0",

@@ -45,6 +45,23 @@ class FakeProviderPool:
     max_open_count: int = 0
     start_gate: asyncio.Event | None = None
     start_started: asyncio.Event = field(default_factory=asyncio.Event)
+    build_gate: asyncio.Event | None = None
+    build_started: asyncio.Event = field(default_factory=asyncio.Event)
+    ignore_build_cancellation: bool = False
+    fail_build: bool = False
+
+    async def build_async(self, context: VoiceProviderBuildContext) -> VoiceProviderAdapter:
+        self.build_started.set()
+        if self.build_gate is not None:
+            try:
+                await self.build_gate.wait()
+            except asyncio.CancelledError:
+                if not self.ignore_build_cancellation:
+                    raise
+                await self.build_gate.wait()
+        if self.fail_build:
+            raise RuntimeError("synthetic construction failure")
+        return self.build(context)
 
     def build(self, context: VoiceProviderBuildContext) -> VoiceProviderAdapter:
         fail_start = self.fail_starts > 0
@@ -190,6 +207,8 @@ async def _runtime_fixture(
     quicksilver_readiness: CredentialReadiness = CredentialReadiness.READY,
     quicksilver_fail_starts: int = 0,
     provider_ready_timeout_secs: float = 1.0,
+    initial_build_gate: asyncio.Event | None = None,
+    start: bool = True,
 ) -> RuntimeFixture:
     sessions = SessionRegistry()
     snapshot = await sessions.create("voice-1", initial_provider_id="cascade")
@@ -201,6 +220,7 @@ async def _runtime_fixture(
         expected_provider_generation=snapshot.provider_generation,
     )
     cascade = FakeProviderPool("cascade")
+    cascade.build_gate = initial_build_gate
     quicksilver = FakeProviderPool("quicksilver", fail_starts=quicksilver_fail_starts)
     events: list[SessionEvent] = []
 
@@ -214,14 +234,21 @@ async def _runtime_fixture(
         registry=sessions,
         providers=VoiceProviderRegistry(
             [
-                _definition(cascade),
-                _definition(quicksilver, readiness=quicksilver_readiness),
+                VoiceProviderDefinition(
+                    _definition(cascade).capabilities,
+                    cascade.build_async if initial_build_gate is not None else cascade.build,
+                ),
+                VoiceProviderDefinition(
+                    _definition(quicksilver, readiness=quicksilver_readiness).capabilities,
+                    quicksilver.build_async,
+                ),
             ]
         ),
         event_sink=collect,
         provider_ready_timeout_secs=provider_ready_timeout_secs,
     )
-    await runtime.process_frame(StartFrame(), FrameDirection.DOWNSTREAM)
+    if start:
+        await runtime.process_frame(StartFrame(), FrameDirection.DOWNSTREAM)
     return RuntimeFixture(
         runtime=runtime,
         sessions=sessions,
@@ -525,3 +552,83 @@ async def test_active_adapter_receives_audio_frames() -> None:
 
     assert fixture.cascade.instances[0].trace[-1] == "InputAudioRawFrame"
     assert fixture.runtime.pushed_frames[-1] == (frame, FrameDirection.DOWNSTREAM)
+
+
+async def test_cleanup_during_initial_construction_never_starts_adapter() -> None:
+    gate = asyncio.Event()
+    fixture = await _runtime_fixture(initial_build_gate=gate, start=False)
+    starting = asyncio.create_task(
+        fixture.runtime.process_frame(StartFrame(), FrameDirection.DOWNSTREAM)
+    )
+    await fixture.cascade.build_started.wait()
+    closing = asyncio.create_task(fixture.runtime.cleanup())
+    try:
+        await asyncio.sleep(0)
+        assert not closing.done()
+    finally:
+        gate.set()
+        await asyncio.gather(starting, closing)
+    assert fixture.cascade.instances[0].closed
+    assert "start" not in fixture.cascade.instances[0].trace
+    assert fixture.cascade.open_count == 0
+
+
+async def test_async_construction_timeout_releases_switch_lock() -> None:
+    fixture = await _runtime_fixture(provider_ready_timeout_secs=0.01)
+    fixture.quicksilver.build_gate = asyncio.Event()
+    switching = asyncio.create_task(fixture.runtime.switch_provider("quicksilver"))
+    try:
+        done, _ = await asyncio.wait({switching}, timeout=0.2)
+        assert switching in done, "construction exceeded provider readiness timeout"
+        assert switching.result().status is ProviderSwitchStatus.ROLLED_BACK
+        result = await fixture.runtime.switch_provider("cascade")
+        assert result.status is ProviderSwitchStatus.UNCHANGED
+    finally:
+        fixture.quicksilver.build_gate.set()
+        await switching
+        await fixture.runtime.cleanup()
+
+
+async def test_initial_construction_timeout_fails_session_and_releases_audio() -> None:
+    fixture = await _runtime_fixture(
+        provider_ready_timeout_secs=0.01, initial_build_gate=asyncio.Event(), start=False
+    )
+    try:
+        with pytest.raises(TimeoutError):
+            await fixture.runtime.process_frame(StartFrame(), FrameDirection.DOWNSTREAM)
+        assert (await fixture.sessions.get("voice-1")).state is SessionState.FAILED
+        assert await fixture.sessions.audio_owner() is None
+        assert fixture.cascade.instances == []
+    finally:
+        await fixture.runtime.cleanup()
+
+
+@pytest.mark.parametrize("fail_build", [False, True])
+async def test_late_construction_is_disposed_before_cleanup_returns(fail_build: bool) -> None:
+    fixture = await _runtime_fixture(provider_ready_timeout_secs=0.01)
+    pool = fixture.quicksilver
+    pool.build_gate = asyncio.Event()
+    pool.ignore_build_cancellation = True
+    pool.fail_build = fail_build
+    switching = asyncio.create_task(fixture.runtime.switch_provider("quicksilver"))
+    closing: asyncio.Task[None] | None = None
+    try:
+        done, _ = await asyncio.wait({switching}, timeout=0.2)
+        assert switching in done
+        assert switching.result().status is ProviderSwitchStatus.ROLLED_BACK
+        closing = asyncio.create_task(fixture.runtime.cleanup())
+        await asyncio.sleep(0)
+        assert not closing.done()
+    finally:
+        pool.build_gate.set()
+        await switching
+        if closing is not None:
+            await closing
+        else:
+            await fixture.runtime.cleanup()
+    if fail_build:
+        assert pool.instances == []
+    else:
+        assert pool.instances[0].closed
+        assert "start" not in pool.instances[0].trace
+    assert pool.open_count == 0
