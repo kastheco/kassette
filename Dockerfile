@@ -13,7 +13,7 @@ RUN apt-get update \
 COPY --from=uv /uv /uvx /bin/
 WORKDIR /app
 
-COPY pyproject.toml uv.lock README.md ./
+COPY pyproject.toml uv.lock README.md LICENSE ./
 RUN uv sync --frozen --no-dev --extra voice --no-install-project
 
 COPY src ./src
