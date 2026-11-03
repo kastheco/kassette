@@ -8,6 +8,11 @@
 - `kassette dictate`, a macos toggle dictation mode: one global hotkey starts and stops recording, then kassette waits for the final AWS transcript, grooms it and pastes it at the cursor while preserving the clipboard
 - dictation docs covering portaudio, Microphone and Accessibility permissions, AWS setup and a sample dictation grooming profile
 
+### fixed
+
+- dictation's generated Cmd-V events reach the focused app even when `cmd+v` is the hotkey
+- clipboard restoration runs when shutdown interrupts paste settling, without overwriting a newer copy
+
 ### security
 
 - AWS credentials, presigned stream URLs and transcript text stay out of logs and status output

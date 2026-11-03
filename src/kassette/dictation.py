@@ -105,11 +105,13 @@ async def paste_text(
         notify(f"paste failed ({type(error).__name__}). the transcript is on the clipboard")
         return PasteOutcome.CLIPBOARD
     # The focused app reads the pasteboard asynchronously after Cmd-V.
-    await asyncio.sleep(settle_secs)
-    if clipboard.change_count() == written:
-        clipboard.restore(saved)
-    else:
-        notify("the clipboard changed during paste, so the previous clipboard wasn't restored")
+    try:
+        await asyncio.sleep(settle_secs)
+    finally:
+        if clipboard.change_count() == written:
+            clipboard.restore(saved)
+        else:
+            notify("the clipboard changed during paste, so the previous clipboard wasn't restored")
     return PasteOutcome.PASTED
 
 

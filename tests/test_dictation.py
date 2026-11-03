@@ -276,6 +276,27 @@ async def test_newer_copy_during_paste_is_not_overwritten() -> None:
     assert "wasn't restored" in messages[0]
 
 
+@pytest.mark.parametrize("new_copy", [None, "user copied this"])
+async def test_cancel_during_paste_restores_only_unchanged_clipboard(new_copy: str | None) -> None:
+    clipboard = FakeClipboard({"public.png": b"image"})
+    keystroke = FakeKeystroke()
+    keystroke.clipboard = clipboard
+    messages: list[str] = []
+    task = asyncio.create_task(
+        paste_text("groomed", clipboard, keystroke, notify=messages.append, settle_secs=60)
+    )
+    await asyncio.sleep(0)
+    assert keystroke.clipboard_at_paste == ["groomed"]
+    if new_copy is not None:
+        clipboard.write_text(new_copy)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert clipboard.contents == (new_copy if new_copy is not None else {"public.png": b"image"})
+
+
 @pytest.mark.parametrize(
     ("value", "keycode", "modifiers", "label"),
     [

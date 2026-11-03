@@ -21,6 +21,7 @@ from kassette.dictation import DictationError
 from kassette.hotkey import COMMAND_MASK, Hotkey
 
 _V_KEYCODE = 9
+_PASTE_EVENT_TAG = 0x4B41535345545445  # "KASSETTE" in the event's user data.
 _MIC_PROMPT_TIMEOUT_SECS = 120.0
 _PERMISSION_PATH = "System Settings → Privacy & Security"
 
@@ -115,6 +116,9 @@ class MacPasteKeystroke:
                 raise RuntimeError("keyboard event could not be created")
             # Exact flags, so modifiers still held from the hotkey don't leak in.
             Quartz.CGEventSetFlags(event, COMMAND_MASK)
+            Quartz.CGEventSetIntegerValueField(
+                event, Quartz.kCGEventSourceUserData, _PASTE_EVENT_TAG
+            )
             Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
 
 
@@ -175,6 +179,11 @@ class MacHotkeyListener:
             Quartz.kCGEventTapDisabledByUserInput,
         ):
             Quartz.CGEventTapEnable(self._tap, True)
+            return event
+        if (
+            Quartz.CGEventGetIntegerValueField(event, Quartz.kCGEventSourceUserData)
+            == _PASTE_EVENT_TAG
+        ):
             return event
         keycode = Quartz.CGEventGetIntegerValueField(event, Quartz.kCGKeyboardEventKeycode)
         if event_type == Quartz.kCGEventKeyUp:

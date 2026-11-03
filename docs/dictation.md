@@ -58,6 +58,8 @@ a toggle while kassette is still finalizing queues a new recording, which starts
 
 kassette saves the current clipboard, writes the transcript, sends Cmd-V to the focused app and then restores the saved clipboard, including images and other non-text types. if you copy something else during the paste, kassette leaves your new copy alone.
 
+clipboard restoration also runs if ctrl-c interrupts the wait after Cmd-V. kassette's own paste events bypass the hotkey listener, including when the hotkey is `cmd+v`.
+
 if Accessibility is revoked while kassette runs, or the keystroke can't be sent, the transcript stays on the clipboard and kassette says so on stderr. paste it by hand.
 
 audio and transcripts are never written to disk. kassette keeps the transcript in memory only until it's pasted.
