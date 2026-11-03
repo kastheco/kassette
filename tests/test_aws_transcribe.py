@@ -428,10 +428,13 @@ async def test_cascade_pause_drains_finals_and_resume_reconnects(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     loop_thread = threading.get_ident()
+    fail_refresh = False
     credentials = AWSTranscribeCredentials(ACCESS_KEY, SECRET_KEY, "first-session", "us-east-1")
 
     def resolve(_settings: KassetteSettings) -> AWSTranscribeCredentials:
         assert threading.get_ident() != loop_thread
+        if fail_refresh:
+            raise AWSCredentialsUnavailableError("synthetic refresh failure")
         return credentials
 
     def local_signed_url(
@@ -478,6 +481,11 @@ async def test_cascade_pause_drains_finals_and_resume_reconnects(
         assert collector.finals == ["um so the jepp release", "ships on friday."]
         assert not stt.connected
         assert fake_transcribe.request_queries[0]["X-Amz-Security-Token"] == "first-session"
+        fail_refresh = True
+        await stt.resume_input()
+        assert not stt.connected
+        assert fake_transcribe.connections == 1
+        fail_refresh = False
         credentials = AWSTranscribeCredentials(
             "AKIDREFRESHED", SECRET_KEY, "refreshed-session", "us-east-1"
         )

@@ -172,6 +172,8 @@ class PausableAWSTranscribeSTTService(AWSTranscribeSTTService):
                 return
             self._input_finished = False
             await self._connect()
+            if not self.connected:
+                return
             self._input_paused = False
 
     async def _connect_websocket(self) -> None:
