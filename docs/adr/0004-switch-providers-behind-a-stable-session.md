@@ -37,6 +37,10 @@ Switching is serialized. The normal path accepts a switch only while listening. 
 
 If replacement setup, startup, or readiness fails, the runtime rebuilds the previous adapter under another provider generation. If rollback also fails, the session enters `failed` and releases the audio lease. Cancellation performs the same rollback before propagating.
 
+asynchronous adapter construction has its own deadline using the configured provider readiness timeout, which defaults to 15 seconds. this applies during initial startup, replacement and rollback. timed-out or cancelled builds can't publish an adapter, and late adapter results are closed. cleanup marks the runtime closed before waiting for the serialized provider operation, then drains pending builds before returning. synchronous factories keep their direct path.
+
+cancelling an AWS factory stops the coroutine from building a pipeline after credentials arrive. it doesn't terminate an already-running credential worker or its subprocess. a factory that suppresses cancellation remains tracked until it finishes, so cleanup waits for its result to be disposed.
+
 Quicksilver can now run with provider lifecycle management disabled. In that mode it emits normalized events while `VoiceProviderRuntime` owns session state and the single audio lease.
 
 ## Client contract

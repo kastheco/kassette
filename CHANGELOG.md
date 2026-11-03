@@ -23,6 +23,8 @@
 - global hotkey startup reports failure when setup exits early or takes longer than ten seconds
 - resumed AWS cascade streams resolve fresh credentials without blocking the event loop
 - initial AWS cascade startup resolves credentials off the event loop before building the provider pipeline
+- provider construction uses the configured readiness timeout during startup, switches and rollback, and late adapter results are closed
+- runtime cleanup waits for pending provider construction and prevents initial adapters from starting after shutdown
 - AWS cascade resume stays paused after a failed reconnect so a later resume can retry
 - dictation drains audio callbacks queued before capture stops, preserving the last recorded words
 - AWS streaming websocket URLs use the China partition's DNS suffix for `cn-` regions
