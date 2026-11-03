@@ -3,6 +3,8 @@ name = "kassette"
 version = "0.2.0"
 description = "Local and hosted realtime voice infrastructure built on Pipecat."
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "botocore==1.43.123",

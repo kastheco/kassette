@@ -8,6 +8,7 @@
 - `kassette dictate`, a macos toggle dictation mode: one global hotkey starts and stops recording, then kassette waits for the final AWS transcript, grooms it and pastes it at the cursor while preserving the clipboard. it talks to AWS Transcribe through `amazon-transcribe` and records with `sounddevice`, without pipecat
 - dictation docs covering Microphone and Accessibility permissions, AWS setup and a sample dictation grooming profile
 - ci license report for `kassette[dictate]`, which fails on any license outside MIT, MIT-0, BSD, Apache-2.0 and PSF and on any voice-stack package
+- MIT license for kassette and the pi-kassette extension, with `license` metadata in `pyproject.toml` and `packages/pi-kassette/package.json`
 
 ### changed
 
