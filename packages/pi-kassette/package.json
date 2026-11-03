@@ -4,6 +4,7 @@
   "type": "module",
   "private": true,
   "description": "Pi voice surface for the local kassette service.",
+  "license": "MIT",
   "exports": "./src/index.ts",
   "pi": {
     "extensions": ["./src/index.ts"]

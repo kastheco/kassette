@@ -261,3 +261,7 @@ intentionally outside kassette's scope:
 - custom-voice enrollment and administration
 
 the original architecture document still has useful design context, but its phased roadmap is historical: [original voice gateway proposal](https://app.notion.com/p/3c7b3a0a9c1980b1a4c8c859b5322778).
+
+## license
+
+kassette is MIT licensed. see [LICENSE](LICENSE).
