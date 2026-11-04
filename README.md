@@ -5,26 +5,30 @@
     </td>
     <td>
       <h1>kassette</h1>
-      <p><strong>local and hosted realtime voice for pi, clickclack, openclaw, and private product backends.</strong></p>
+      <p><strong>macos toggle dictation and local or hosted realtime voice for pi, clickclack, openclaw, and private product backends.</strong></p>
       <p><a href="https://github.com/kastheco/kassette/actions/workflows/ci.yml"><img src="https://github.com/kastheco/kassette/actions/workflows/ci.yml/badge.svg" alt="ci"></a></p>
     </td>
   </tr>
 </table>
 
-kassette is a realtime voice service built on pipecat. local mode owns one machine's audio devices for clickclack and pi. hosted mode runs authenticated, concurrent webrtc sessions behind a trusted product backend. products and agent runtimes keep their own durable conversations in both modes.
+kassette provides realtime voice sessions and macos toggle dictation. local voice mode owns one machine's audio devices for clickclack and pi. hosted voice mode runs authenticated, concurrent webrtc sessions behind a trusted product backend. both use pipecat, while dictation streams directly to AWS Transcribe without the voice stack. products and agent runtimes keep their own durable conversations.
 
-the default path is a cascade. gemini 3.5 transcribe live produces provisional and final transcripts, then fish audio speaks the response returned by the active client. the cascade can use openai's low-latency `gpt-live-transcribe` model instead. quicksilver gpt-live is the second runtime-selectable adapter. clickclack delegates each spoken request through its active openclaw conversation, while pi delegates through its current terminal session. both return the agent's answer to quicksilver for native speech.
+the default voice path is a cascade: gemini 3.5 transcribe live, openai `gpt-live-transcribe`, or AWS Transcribe produces provisional and final transcripts, then fish audio speaks the response returned by the active client. quicksilver gpt-live and Gemini Live provide native audio adapters. clickclack delegates spoken requests through its active openclaw conversation, while pi delegates through its current terminal session.
 
-## project status
+## choose a surface
 
-the original local voice-gateway scope is in daily use through the clickclack electron app. clickclack owns the durable openclaw conversation. kassette handles microphone input, live transcription, streamed speech, interruption, and playback.
-
-the repository also includes `pi-kassette`, a linux terminal voice client for pi. pi keeps its normal conversation and reasoning. kassette owns the short-lived voice session and local devices.
+| surface | entry point | use |
+| --- | --- | --- |
+| [macos dictation](#macos-toggle-dictation) | `kassette dictate` | toggle a global hotkey to paste a groomed AWS transcript into the focused app |
+| [local voice](#local-mode) | `kassette serve`, `kassette call` | run conversational voice for clickclack, openclaw and local clients |
+| [pi voice](#pi-voice-surface) | `/kassette` in pi | speak to the current pi conversation from a linux terminal |
+| [hosted voice](#hosted-mode) | `kassette serve --hosted` | serve authenticated, concurrent webrtc sessions behind a private backend |
+| [Screenpipe transcription](#screenpipe-batch-transcription) | `POST /v1/audio/transcriptions` | transcribe completed audio chunks through the local service |
 
 ## local mode
 
 ```bash
-uv sync --extra voice
+uv sync --locked --extra voice
 cp .env.example .env
 # add GOOGLE_API_KEY and FISH_API_KEY to .env.
 # or select openai transcription and add OPENAI_API_KEY instead.
@@ -38,6 +42,16 @@ local mode binds to `127.0.0.1:7860` by default. both `serve` and `call` continu
 
 message playback uses `POST /api/tts` on the same local service. the endpoint accepts `{ "text": "..." }`, returns mono 24 khz wav audio, and keeps a small process-local content cache. product clients should keep their own refresh-scoped audio cache so replay doesn't call the provider again.
 
+### AWS transcription
+
+the cascade can use AWS Transcribe instead of gemini or openai:
+
+```bash
+KASSETTE_TRANSCRIPTION_PROVIDER=aws AWS_PROFILE=personal uv run kassette serve
+```
+
+AWS credentials come from the standard credential chain. the identity needs `transcribe:StartStreamTranscription`. cascade speech output still needs `FISH_API_KEY`. `KASSETTE_AWS_REGION` overrides the region resolved from the AWS environment or profile, with `us-east-1` as the fallback. optional `KASSETTE_AWS_VOCABULARY_NAME` and `KASSETTE_AWS_VOCABULARY_FILTER_NAME` select a custom vocabulary and a filter in that region. filters use `remove` to drop matched words. the same AWS settings apply to dictation.
+
 ### macos toggle dictation
 
 `kassette dictate` turns a global hotkey into fast dictation on macos. press it once to start, speak, and press it again. kassette streams to AWS Transcribe, waits for the final transcript, grooms it and pastes it at the cursor in the focused app. it runs as its own local process, outside the webrtc service.
@@ -47,7 +61,7 @@ uv sync --locked --extra dictate
 KASSETTE_TRANSCRIPTION_PROVIDER=aws AWS_PROFILE=personal uv run --extra dictate kassette dictate
 ```
 
-the default hotkey is `ctrl+option+d`. the terminal app needs Microphone and Accessibility access. audio and transcripts stay off disk, and status output leaves transcript text out. see [docs/dictation.md](docs/dictation.md) for permissions, AWS setup, vocabularies, paste behavior and a sample dictation grooming profile.
+the default hotkey is `ctrl+option+d`. change it with `--hotkey` or `KASSETTE_DICTATE_HOTKEY`. the terminal app needs Microphone and Accessibility access. kassette preserves the clipboard, including non-text content, and doesn't overwrite anything copied during the paste. toggling while finalization is pending queues the next recording. another toggle cancels it. audio and transcripts stay off disk, and status output leaves transcript text out. see [docs/dictation.md](docs/dictation.md) for permissions, AWS setup, paste behavior and a sample dictation grooming profile.
 
 ### install extras
 
@@ -82,13 +96,13 @@ hosted sessions use one replacement slot and one media lease per logical session
 build and run the production image with:
 
 ```bash
-podman build --tag kassette:0.2.0 .
+podman build --tag kassette:0.3.0 .
 podman run --rm \
   --env PORT=7860 \
   --env KASSETTE_SERVICE_SECRET \
   --env KASSETTE_ICE_SERVERS \
   --publish 127.0.0.1:7860:7860 \
-  kassette:0.2.0
+  kassette:0.3.0
 ```
 
 the image installs from `uv.lock`, runs as the non-root `kassette` user, starts with `kassette serve --hosted`, exposes the default application port, and shuts down active session workers and WebRTC connections on termination.
@@ -99,8 +113,8 @@ merging a version change to `main` runs [the release workflow](.github/workflows
 
 release containers use these tags:
 
-- `ghcr.io/kastheco/kassette:0.2.0` for the exact release
-- `ghcr.io/kastheco/kassette:0.2` for the current compatible minor release
+- `ghcr.io/kastheco/kassette:0.3.0` for the exact release
+- `ghcr.io/kastheco/kassette:0.3` for the current compatible minor release
 - `ghcr.io/kastheco/kassette:sha-<commit>` for commit-addressed rollback
 
 the release records the immutable image digest and attaches `kassette-<version>-py3-none-any.whl` plus `kassette-<version>.tar.gz`. Kassette is not published to PyPI.
@@ -240,6 +254,7 @@ implemented:
 - loopback terminal sessions with service-owned local audio and the pi voice surface
 - selectable gemini 3.5 transcribe live, openai gpt live transcribe, or AWS Transcribe streaming stt
 - macos toggle dictation that pastes groomed final transcripts at the cursor
+- separate `voice` and `dictate` extras, with a pipecat-free dictation dependency set checked by ci
 - provider-neutral provisional and final transcript events
 - optional deterministic transcript grooming through external profiles
 - fish audio streaming tts for agent responses
@@ -264,4 +279,4 @@ the original architecture document still has useful design context, but its phas
 
 ## license
 
-kassette is MIT licensed. see [LICENSE](LICENSE).
+kassette and the pi-kassette extension are MIT licensed. see [LICENSE](LICENSE). the optional `voice` stack retains its dependencies' licenses. ci checks that the `dictate` extra installs only MIT, MIT-0, BSD, Apache-2.0 and PSF licensed packages.

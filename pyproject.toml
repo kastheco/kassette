@@ -1,6 +1,6 @@
 [project]
 name = "kassette"
-version = "0.2.0"
+version = "0.3.0"
 description = "Local and hosted realtime voice infrastructure built on Pipecat."
 readme = "README.md"
 license = "MIT"
