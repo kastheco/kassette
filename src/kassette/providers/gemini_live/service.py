@@ -8,16 +8,23 @@ from typing import Any, cast
 
 from google.genai.types import FunctionResponse, InteractionStatus, LiveServerMessage
 from pipecat.adapters.schemas.function_schema import FunctionSchema
-from pipecat.frames.frames import Frame, InterruptionFrame, OutputTransportMessageUrgentFrame
+from pipecat.frames.frames import (
+    Frame,
+    InterruptionFrame,
+    LLMFullResponseStartFrame,
+    OutputTransportMessageUrgentFrame,
+    TTSStartedFrame,
+)
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.google.gemini_live.llm import GeminiLiveLLMService
 from pipecat.services.llm_service import FunctionCallParams
 
-from kassette.domain import EventSink, SessionEvent, SessionEventType, SessionState
+from kassette.domain import EventSink, SessionEvent, SessionEventType, SessionState, TranscriptRole
 
 CONSULT_TOOL_NAME = "kassette_agent_consult"
 _MAX_DELEGATION_TEXT_CHARS = 32_000
+_MAX_TRANSCRIPT_CHARS = 32_000
 DELEGATED_GEMINI_LIVE_INSTRUCTIONS = """You are Kassette's realtime voice layer.
 
 For every non-empty user request, call kassette_agent_consult before giving a
@@ -53,6 +60,10 @@ class DelegatedGeminiLiveService(GeminiLiveLLMService):
         self._publish_client_events = publish_client_events
         self._pending_delegations: dict[str, _PendingDelegation] = {}
         self._closed = False
+        self._user_transcript = ""
+        self._user_turn_id: str | None = None
+        self._user_turn_number = 0
+        self._assistant_transcript = ""
         thinking = {"thinking_level": thinking_level.upper()} if thinking_level is not None else {}
         tool = FunctionSchema(
             name=CONSULT_TOOL_NAME,
@@ -106,7 +117,54 @@ class DelegatedGeminiLiveService(GeminiLiveLLMService):
         if self._context is None:
             self._ready_for_realtime_input = True
 
+    async def _handle_msg_input_transcription(self, message: LiveServerMessage) -> None:
+        # Replaces Pipecat's handler, which logs the user's words at debug level.
+        server_content = message.server_content
+        transcription = server_content.input_transcription if server_content else None
+        if transcription is None:
+            return
+        text = transcription.text or ""
+        if self._user_turn_id is None:
+            text = text.lstrip()
+        if text:
+            if self._user_turn_id is None:
+                self._user_turn_number += 1
+                self._user_turn_id = f"{self._session_id}:{self._user_turn_number}"
+            self._user_transcript = (self._user_transcript + text)[:_MAX_TRANSCRIPT_CHARS]
+            await self._emit_transcript(
+                SessionEventType.TRANSCRIPT_DELTA,
+                TranscriptRole.USER,
+                self._user_transcript.rstrip(),
+                turn_id=self._user_turn_id,
+            )
+        if transcription.finished:
+            await self._finish_user_transcript()
+
+    async def _handle_msg_output_transcription(self, message: LiveServerMessage) -> None:
+        server_content = message.server_content
+        transcription = server_content.output_transcription if server_content else None
+        if transcription is None:
+            return
+        text = transcription.text or ""
+        if text:
+            await self._finish_user_transcript()
+            self._assistant_transcript = (self._assistant_transcript + text)[:_MAX_TRANSCRIPT_CHARS]
+            await self._emit_transcript(
+                SessionEventType.TRANSCRIPT_DELTA, TranscriptRole.ASSISTANT, text
+            )
+        if self._publish_client_events:
+            await super()._handle_msg_output_transcription(message)  # pyright: ignore[reportPrivateUsage]
+        elif text and not self._bot_is_responding:
+            # Terminal transcripts go through the event sink, not trace-logged text frames.
+            await self._set_bot_is_responding(True)
+            await self.push_frame(TTSStartedFrame())
+            await self.push_frame(LLMFullResponseStartFrame())
+        if transcription.finished:
+            await self._finish_assistant_transcript()
+
     async def _handle_msg_turn_complete(self, message: LiveServerMessage) -> None:
+        await self._finish_user_transcript()
+        await self._finish_assistant_transcript()
         server_content = message.server_content
         if server_content and server_content.interaction_status in {
             InteractionStatus.IN_PROGRESS,
@@ -144,6 +202,7 @@ class DelegatedGeminiLiveService(GeminiLiveLLMService):
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
         if isinstance(frame, InterruptionFrame):
             self._cancel_pending_delegations()
+            await self._finish_assistant_transcript()
         await super().process_frame(frame, direction)
 
     async def cleanup(self) -> None:
@@ -152,6 +211,7 @@ class DelegatedGeminiLiveService(GeminiLiveLLMService):
         await super().cleanup()
 
     async def _delegate(self, params: FunctionCallParams) -> None:
+        await self._finish_user_transcript()
         request = params.arguments.get("request")
         text = request.strip() if isinstance(request, str) else ""
         if not text:
@@ -228,6 +288,42 @@ class DelegatedGeminiLiveService(GeminiLiveLLMService):
                 }
             )
         )
+
+    async def _emit_transcript(
+        self,
+        event_type: SessionEventType,
+        role: TranscriptRole,
+        text: str,
+        *,
+        turn_id: str | None = None,
+    ) -> None:
+        await self._event_sink(
+            SessionEvent(
+                session_id=self._session_id,
+                type=event_type,
+                role=role,
+                text=text,
+                metadata={"turn_id": turn_id} if turn_id is not None else {},
+            )
+        )
+
+    async def _finish_user_transcript(self) -> None:
+        text = self._user_transcript.strip()
+        turn_id = self._user_turn_id
+        self._user_transcript = ""
+        self._user_turn_id = None
+        if text and turn_id is not None:
+            await self._emit_transcript(
+                SessionEventType.TRANSCRIPT_FINAL, TranscriptRole.USER, text, turn_id=turn_id
+            )
+
+    async def _finish_assistant_transcript(self) -> None:
+        text = self._assistant_transcript.strip()
+        self._assistant_transcript = ""
+        if text:
+            await self._emit_transcript(
+                SessionEventType.TRANSCRIPT_FINAL, TranscriptRole.ASSISTANT, text
+            )
 
     def _cancel_pending_delegations(self) -> None:
         for pending in self._pending_delegations.values():

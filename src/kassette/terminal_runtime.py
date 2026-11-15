@@ -190,6 +190,14 @@ def session_event_envelope(event: SessionEvent) -> dict[str, object] | None:
     return envelope(event.type.value, data)
 
 
+def terminal_event_envelope(event: SessionEvent, active_provider: str) -> dict[str, object] | None:
+    """Avoid duplicating cascade transcripts already sent through the frame pipeline."""
+    if event.type in {SessionEventType.TRANSCRIPT_DELTA, SessionEventType.TRANSCRIPT_FINAL}:
+        if active_provider not in {"quicksilver", "gemini-live"}:
+            return None
+    return session_event_envelope(event)
+
+
 async def run_terminal_voice_session(
     session: TerminalSession,
     settings: KassetteSettings,
@@ -243,12 +251,8 @@ async def run_terminal_voice_session(
         output_active = terminal_output_active_for_event(event.type)
         if output_active is not None:
             await input_processor.set_output_active(output_active)
-        message = session_event_envelope(event)
-        is_transcript = event.type in {
-            SessionEventType.TRANSCRIPT_DELTA,
-            SessionEventType.TRANSCRIPT_FINAL,
-        }
-        if message is not None and (not is_transcript or active_provider == "quicksilver"):
+        message = terminal_event_envelope(event, active_provider)
+        if message is not None:
             await session.send(message)
         if (
             event.type is SessionEventType.SESSION_STATE_CHANGED

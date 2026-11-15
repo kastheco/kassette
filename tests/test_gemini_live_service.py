@@ -5,12 +5,13 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from google.genai.types import FunctionResponse
+from google.genai.types import FunctionResponse, LiveServerContent, LiveServerMessage, Transcription
+from loguru import logger
 from pipecat.frames.frames import Frame, OutputTransportMessageUrgentFrame
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.llm_service import FunctionCallParams
 
-from kassette.domain import SessionEvent, SessionEventType, SessionState
+from kassette.domain import SessionEvent, SessionEventType, SessionState, TranscriptRole
 from kassette.providers.builtin import build_builtin_provider_registry
 from kassette.providers.gemini_live.service import (
     CONSULT_TOOL_NAME,
@@ -80,6 +81,7 @@ def test_gemini_live_models_are_selectable_through_settings() -> None:
     provider = registry.resolve("gemini-live")
     assert provider is not None
     assert provider.capabilities.credential_readiness.value == "ready"
+    assert provider.capabilities.client_data()["supports_transcripts"] is True
 
 
 async def test_gemini_live_accepts_audio_without_an_llm_context() -> None:
@@ -96,6 +98,99 @@ async def test_gemini_live_accepts_audio_without_an_llm_context() -> None:
     await service._handle_session_ready(object())  # pyright: ignore[reportPrivateUsage]
 
     assert service._ready_for_realtime_input
+
+
+async def test_live_transcripts_stream_and_settle_without_logging() -> None:
+    events: list[SessionEvent] = []
+    logs: list[str] = []
+
+    async def collect(event: SessionEvent) -> None:
+        events.append(event)
+
+    service = RecordingGeminiLiveService(
+        session_id="voice-1",
+        api_key="test-key",
+        model="gemini-3.8-live-extended-thinking",
+        event_sink=collect,
+    )
+    sink = logger.add(lambda message: logs.append(str(message)), level="TRACE")
+    try:
+        for text in ("private words", " continue."):
+            await service._handle_msg_input_transcription(
+                LiveServerMessage(
+                    server_content=LiveServerContent(input_transcription=Transcription(text=text))
+                )
+            )
+        for text in ("spoken ", "answer"):
+            await service._handle_msg_output_transcription(
+                LiveServerMessage(
+                    server_content=LiveServerContent(output_transcription=Transcription(text=text))
+                )
+            )
+        await service._handle_msg_turn_complete(
+            LiveServerMessage(server_content=LiveServerContent(turn_complete=True))
+        )
+    finally:
+        logger.remove(sink)
+
+    assert [(e.type, e.role, e.text, e.metadata) for e in events] == [
+        (
+            SessionEventType.TRANSCRIPT_DELTA,
+            TranscriptRole.USER,
+            "private words",
+            {"turn_id": "voice-1:1"},
+        ),
+        (
+            SessionEventType.TRANSCRIPT_DELTA,
+            TranscriptRole.USER,
+            "private words continue.",
+            {"turn_id": "voice-1:1"},
+        ),
+        (
+            SessionEventType.TRANSCRIPT_FINAL,
+            TranscriptRole.USER,
+            "private words continue.",
+            {"turn_id": "voice-1:1"},
+        ),
+        (SessionEventType.TRANSCRIPT_DELTA, TranscriptRole.ASSISTANT, "spoken ", {}),
+        (SessionEventType.TRANSCRIPT_DELTA, TranscriptRole.ASSISTANT, "answer", {}),
+        (SessionEventType.TRANSCRIPT_FINAL, TranscriptRole.ASSISTANT, "spoken answer", {}),
+    ]
+    assert not any("private words" in line or "spoken answer" in line for line in logs)
+
+
+async def test_finished_transcription_closes_each_role_once() -> None:
+    events: list[SessionEvent] = []
+
+    async def collect(event: SessionEvent) -> None:
+        events.append(event)
+
+    service = RecordingGeminiLiveService(
+        session_id="voice-1", api_key="test-key", model="gemini-3.8-live", event_sink=collect
+    )
+    await service._handle_msg_input_transcription(
+        LiveServerMessage(
+            server_content=LiveServerContent(
+                input_transcription=Transcription(text="hello", finished=True)
+            )
+        )
+    )
+    await service._handle_msg_output_transcription(
+        LiveServerMessage(
+            server_content=LiveServerContent(
+                output_transcription=Transcription(text="hi", finished=True)
+            )
+        )
+    )
+    await service._handle_msg_turn_complete(
+        LiveServerMessage(server_content=LiveServerContent(turn_complete=True))
+    )
+    assert [(e.type, e.role, e.text) for e in events] == [
+        (SessionEventType.TRANSCRIPT_DELTA, TranscriptRole.USER, "hello"),
+        (SessionEventType.TRANSCRIPT_FINAL, TranscriptRole.USER, "hello"),
+        (SessionEventType.TRANSCRIPT_DELTA, TranscriptRole.ASSISTANT, "hi"),
+        (SessionEventType.TRANSCRIPT_FINAL, TranscriptRole.ASSISTANT, "hi"),
+    ]
 
 
 async def test_gemini_live_delegates_to_the_active_client() -> None:

@@ -195,6 +195,8 @@ the extension connects to `http://127.0.0.1:7860` and starts `kassette serve` wh
 
 terminal sessions are loopback-only and use a one-use random capability. their control channel carries transcript, state, and real input/output level events. normal logs leave transcript and response text out.
 
+gemini-live terminal sessions stream user and assistant audio transcripts as `transcript.delta` and `transcript.final` events. user deltas are cumulative per `turn_id`, assistant deltas are incremental, and final events contain the completed text. `provider.active` advertises `supports_transcripts`.
+
 run the extension checks with:
 
 ```bash
