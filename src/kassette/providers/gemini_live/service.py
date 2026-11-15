@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import time
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -31,8 +30,6 @@ from kassette.domain import EventSink, SessionEvent, SessionEventType, SessionSt
 CONSULT_TOOL_NAME = "kassette_agent_consult"
 _MAX_DELEGATION_TEXT_CHARS = 32_000
 _MAX_TRANSCRIPT_CHARS = 32_000
-# A brief window lets late provider fragments amend the preceding user turn.
-_LATE_TAIL_SECS = 1.0
 # An open user turn with no new text for this long settles, so every delta gets a final.
 _USER_SETTLE_SECS = 2.0
 DELEGATED_GEMINI_LIVE_INSTRUCTIONS = """You are Kassette's realtime voice layer.
@@ -89,9 +86,6 @@ class DelegatedGeminiLiveService(GeminiLiveLLMService):
         self._user_turn_id: str | None = None
         self._user_turn_number = 0
         self._assistant_transcript = ""
-        self._user_pushed = ""
-        self._tail_turn: tuple[str, str] | None = None
-        self._tail_until = 0.0
         self._user_settle_secs = _USER_SETTLE_SECS
         self._user_settle_task: asyncio.Task[None] | None = None
         thinking = {"thinking_level": thinking_level.upper()} if thinking_level is not None else {}
@@ -142,7 +136,7 @@ class DelegatedGeminiLiveService(GeminiLiveLLMService):
 
     async def _handle_session_ready(self, session: Any) -> None:
         # A reconnect reuses this service. Settle the dropped turn so it isn't glued onto the next.
-        await self._finish_user_transcript(tail_secs=None)
+        await self._finish_user_transcript()
         await self._finish_assistant_transcript()
         await super()._handle_session_ready(session)  # pyright: ignore[reportPrivateUsage]
         # Kassette intentionally has no LLM context aggregator. Pipecat otherwise
@@ -154,20 +148,16 @@ class DelegatedGeminiLiveService(GeminiLiveLLMService):
         # Replaces Pipecat's handler, which logs the user's words at debug level.
         server_content = message.server_content
         transcription = server_content.input_transcription if server_content else None
-        if transcription is None:
+        if transcription is None or self._closed:
             return
         text = transcription.text or ""
         if self._user_turn_id is None:
             if not text.strip():
                 text = ""
-            elif self._tail_turn is not None and time.monotonic() <= self._tail_until:
-                self._user_turn_id, self._user_transcript = self._tail_turn
             else:
                 self._user_turn_number += 1
                 self._user_turn_id = f"{self._session_id}:{self._user_turn_number}"
-                self._user_pushed = ""
                 text = text.lstrip()
-            self._tail_turn = None
         if text and self._user_turn_id is not None:
             self._user_transcript = (self._user_transcript + text)[:_MAX_TRANSCRIPT_CHARS]
             await self._emit_transcript(
@@ -176,9 +166,11 @@ class DelegatedGeminiLiveService(GeminiLiveLLMService):
                 self._user_transcript.rstrip(),
                 turn_id=self._user_turn_id,
             )
+            if self._closed:
+                return
             self._schedule_user_settle(self._user_turn_id)
         if transcription.finished:
-            await self._finish_user_transcript(tail_secs=None)
+            await self._finish_user_transcript()
 
     async def _handle_msg_output_transcription(self, message: LiveServerMessage) -> None:
         server_content = message.server_content
@@ -187,7 +179,7 @@ class DelegatedGeminiLiveService(GeminiLiveLLMService):
             return
         text = transcription.text or ""
         if text:
-            await self._finish_user_transcript(tail_secs=_LATE_TAIL_SECS)
+            await self._finish_user_transcript()
             self._assistant_transcript = (self._assistant_transcript + text)[:_MAX_TRANSCRIPT_CHARS]
             await self._emit_transcript(
                 SessionEventType.TRANSCRIPT_DELTA, TranscriptRole.ASSISTANT, text
@@ -224,10 +216,12 @@ class DelegatedGeminiLiveService(GeminiLiveLLMService):
         tts_frame.includes_inter_frame_spaces = True
         await self.push_frame(tts_frame)
 
+    async def _handle_msg_tool_call(self, message: LiveServerMessage) -> None:
+        await self._finish_user_transcript()
+        await super()._handle_msg_tool_call(message)  # pyright: ignore[reportPrivateUsage]
+
     async def _handle_msg_turn_complete(self, message: LiveServerMessage) -> None:
-        await self._finish_user_transcript(tail_secs=_LATE_TAIL_SECS)
-        if self._tail_turn is not None:
-            self._tail_until = min(self._tail_until, time.monotonic() + _LATE_TAIL_SECS)
+        await self._finish_user_transcript()
         await self._finish_assistant_transcript()
         server_content = message.server_content
         if server_content and server_content.interaction_status in {
@@ -266,11 +260,11 @@ class DelegatedGeminiLiveService(GeminiLiveLLMService):
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
         if isinstance(frame, InterruptionFrame):
             self._cancel_pending_delegations()
-            await self._settle_barge_in()
+            await self._finish_assistant_transcript()
         await super().process_frame(frame, direction)
 
     async def broadcast_interruption(self) -> None:
-        await self._settle_barge_in()
+        await self._finish_assistant_transcript()
         await super().broadcast_interruption()
 
     async def cleanup(self) -> None:
@@ -281,13 +275,7 @@ class DelegatedGeminiLiveService(GeminiLiveLLMService):
             self._user_settle_task = None
         await super().cleanup()
 
-    async def _settle_barge_in(self) -> None:
-        # Speech after a barge-in starts a new user turn.
-        self._tail_turn = None
-        await self._finish_assistant_transcript()
-
     async def _delegate(self, params: FunctionCallParams) -> None:
-        await self._finish_user_transcript(tail_secs=_LATE_TAIL_SECS)
         request = params.arguments.get("request")
         text = request.strip() if isinstance(request, str) else ""
         if not text:
@@ -386,42 +374,34 @@ class DelegatedGeminiLiveService(GeminiLiveLLMService):
     def _schedule_user_settle(self, turn_id: str) -> None:
         if self._user_settle_task is not None:
             self._user_settle_task.cancel()
+            self._user_settle_task = None
+        if self._closed:
+            return
         self._user_settle_task = asyncio.create_task(self._settle_user_turn(turn_id))
 
     async def _settle_user_turn(self, turn_id: str) -> None:
         await asyncio.sleep(self._user_settle_secs)
-        if self._user_turn_id == turn_id:
-            self._user_settle_task = None
-            await self._finish_user_transcript(tail_secs=_LATE_TAIL_SECS)
+        if self._closed or self._user_turn_id != turn_id:
+            return
+        self._user_settle_task = None
+        await self._finish_user_transcript()
 
-    async def _finish_user_transcript(self, *, tail_secs: float | None) -> None:
-        """Close the open user turn. A late tail may reopen it within `tail_secs`."""
+    async def _finish_user_transcript(self) -> None:
         if self._user_settle_task is not None:
             self._user_settle_task.cancel()
             self._user_settle_task = None
-        if tail_secs is None:
-            self._tail_turn = None
-        raw_text = self._user_transcript
-        text = raw_text.strip()
+        text = self._user_transcript.strip()
         turn_id = self._user_turn_id
         self._user_transcript = ""
         self._user_turn_id = None
         if not text or turn_id is None:
             return
-        if tail_secs is not None:
-            self._tail_turn = (turn_id, raw_text)
-            self._tail_until = time.monotonic() + tail_secs
         await self._emit_transcript(
             SessionEventType.TRANSCRIPT_FINAL, TranscriptRole.USER, text, turn_id=turn_id
         )
         if self._publish_client_events:
-            # The web client's user captions come from this upstream frame. An amended turn
-            # sends only the words its earlier frame didn't carry.
-            pushed = self._user_pushed
-            unsent = text[len(pushed) :] if text.startswith(pushed) else text
-            self._user_pushed = text
-            if unsent.strip():
-                await self._push_user_transcription(unsent.strip())  # pyright: ignore[reportPrivateUsage]
+            # The web client's user captions come from this upstream frame.
+            await self._push_user_transcription(text)  # pyright: ignore[reportPrivateUsage]
 
     async def _finish_assistant_transcript(self) -> None:
         text = self._assistant_transcript.strip()

@@ -13,6 +13,7 @@ from google.genai.types import (
     LiveConnectConfig,
     LiveServerContent,
     LiveServerMessage,
+    LiveServerToolCall,
     Transcription,
 )
 from loguru import logger
@@ -249,6 +250,21 @@ def _output(text: str, *, complete: bool = False) -> LiveServerMessage:
     )
 
 
+def _assert_turns_settled(events: list[SessionEvent]) -> None:
+    deltas = {
+        event.metadata["turn_id"]
+        for event in events
+        if event.role == TranscriptRole.USER and event.type == SessionEventType.TRANSCRIPT_DELTA
+    }
+    finals = [
+        event.metadata["turn_id"]
+        for event in events
+        if event.role == TranscriptRole.USER and event.type == SessionEventType.TRANSCRIPT_FINAL
+    ]
+    assert len(finals) == len(set(finals))
+    assert set(finals) == deltas
+
+
 async def test_dispatch_web_captions_and_late_input_without_logging() -> None:
     events: list[SessionEvent] = []
     logs: list[str] = []
@@ -289,9 +305,10 @@ async def test_dispatch_web_captions_and_late_input_without_logging() -> None:
     assert [(event.type, event.text, event.metadata["turn_id"]) for event in user] == [
         (SessionEventType.TRANSCRIPT_DELTA, "private words", "voice:1"),
         (SessionEventType.TRANSCRIPT_FINAL, "private words", "voice:1"),
-        (SessionEventType.TRANSCRIPT_DELTA, "private words tail", "voice:1"),
-        (SessionEventType.TRANSCRIPT_FINAL, "private words tail", "voice:1"),
+        (SessionEventType.TRANSCRIPT_DELTA, "tail", "voice:2"),
+        (SessionEventType.TRANSCRIPT_FINAL, "tail", "voice:2"),
     ]
+    _assert_turns_settled(events)
     assert not any("private words" in line or "spoken reply" in line for line in logs)
 
 
@@ -336,7 +353,7 @@ async def test_linked_web_frames_keep_captions_out_of_trace_logs() -> None:
     assert not any("private input" in line or "private output" in line for line in logs)
 
 
-async def test_unanswered_new_turn_settles_after_late_tail_window() -> None:
+async def test_unanswered_new_turn_settles_after_turn_complete() -> None:
     events: list[SessionEvent] = []
 
     async def collect(event: SessionEvent) -> None:
@@ -347,7 +364,6 @@ async def test_unanswered_new_turn_settles_after_late_tail_window() -> None:
     )
     service._user_settle_secs = 0.01
     await _dispatch(service, [_input("first"), _output("answer", complete=True)])
-    service._tail_until = 0
     await service._handle_msg_input_transcription(_input("next"))
     await asyncio.sleep(0.05)
     user = [event for event in events if event.role == TranscriptRole.USER]
@@ -357,6 +373,7 @@ async def test_unanswered_new_turn_settles_after_late_tail_window() -> None:
         (SessionEventType.TRANSCRIPT_DELTA, "next", "voice:2"),
         (SessionEventType.TRANSCRIPT_FINAL, "next", "voice:2"),
     ]
+    _assert_turns_settled(events)
 
 
 async def test_dispatch_interruption_and_reconnect_clear_turns(
@@ -402,6 +419,163 @@ async def test_dispatch_interruption_and_reconnect_clear_turns(
         (TranscriptRole.USER, "third"),
         (TranscriptRole.ASSISTANT, "new answer"),
     ]
+    _assert_turns_settled(events)
+
+
+async def test_interleaved_input_and_output_start_distinct_turns() -> None:
+    events: list[SessionEvent] = []
+
+    async def collect(event: SessionEvent) -> None:
+        events.append(event)
+
+    service = RecordingGeminiLiveService(
+        session_id="voice", api_key="test-key", model="gemini-3.8-live", event_sink=collect
+    )
+    await _dispatch(
+        service,
+        [
+            _input("hi"),
+            _output("one "),
+            _input("wait"),
+            _output("two", complete=True),
+        ],
+    )
+    user_finals = [
+        (event.text, event.metadata["turn_id"])
+        for event in events
+        if event.role == TranscriptRole.USER and event.type == SessionEventType.TRANSCRIPT_FINAL
+    ]
+    assert user_finals == [("hi", "voice:1"), ("wait", "voice:2")]
+    assert any(
+        event.role == TranscriptRole.ASSISTANT
+        and event.text == "one two"
+        and event.type == SessionEventType.TRANSCRIPT_FINAL
+        for event in events
+    )
+    _assert_turns_settled(events)
+
+
+async def test_tool_call_closes_turn_before_late_input(monkeypatch: pytest.MonkeyPatch) -> None:
+    events: list[SessionEvent] = []
+
+    async def collect(event: SessionEvent) -> None:
+        events.append(event)
+
+    async def handle_tool(_service: GeminiLiveLLMService, _message: LiveServerMessage) -> None:
+        return
+
+    monkeypatch.setattr(GeminiLiveLLMService, "_handle_msg_tool_call", handle_tool)
+    service = RecordingGeminiLiveService(
+        session_id="voice", api_key="test-key", model="gemini-3.8-live", event_sink=collect
+    )
+    service._user_settle_secs = 0.01
+    await _dispatch(
+        service,
+        [
+            _input("request"),
+            LiveServerMessage(tool_call=LiveServerToolCall()),
+            _input("late"),
+        ],
+    )
+    await asyncio.sleep(0.05)
+    assert [
+        (event.text, event.metadata["turn_id"])
+        for event in events
+        if event.role == TranscriptRole.USER and event.type == SessionEventType.TRANSCRIPT_FINAL
+    ] == [("request", "voice:1"), ("late", "voice:2")]
+    _assert_turns_settled(events)
+
+
+async def test_cleanup_during_input_does_not_start_timer(monkeypatch: pytest.MonkeyPatch) -> None:
+    entered, release, cleanup_entered, cleanup_release = (asyncio.Event() for _ in range(4))
+    events: list[SessionEvent] = []
+
+    async def collect(event: SessionEvent) -> None:
+        events.append(event)
+        entered.set()
+        await release.wait()
+
+    async def cleanup(_service: GeminiLiveLLMService) -> None:
+        cleanup_entered.set()
+        await cleanup_release.wait()
+
+    monkeypatch.setattr(GeminiLiveLLMService, "cleanup", cleanup)
+    service = RecordingGeminiLiveService(
+        session_id="voice", api_key="test-key", model="gemini-3.8-live", event_sink=collect
+    )
+    service._user_settle_secs = 0.01
+    incoming = asyncio.create_task(service._handle_msg_input_transcription(_input("private")))
+    await entered.wait()
+    closing = asyncio.create_task(service.cleanup())
+    await cleanup_entered.wait()
+    release.set()
+    await incoming
+    await service._handle_msg_input_transcription(_input("ignored"))
+    cleanup_release.set()
+    await closing
+    await asyncio.sleep(0.05)
+    assert service._user_settle_task is None
+    assert [(event.type, event.text) for event in events] == [
+        (SessionEventType.TRANSCRIPT_DELTA, "private")
+    ]
+
+
+async def test_real_reconnect_with_fake_live_connection(monkeypatch: pytest.MonkeyPatch) -> None:
+    events: list[SessionEvent] = []
+
+    async def collect(event: SessionEvent) -> None:
+        events.append(event)
+
+    service = RecordingGeminiLiveService(
+        session_id="voice", api_key="test-key", model="gemini-3.8-live", event_sink=collect
+    )
+
+    class Connection:
+        async def __aenter__(self) -> Any:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return
+
+        async def close(self) -> None:
+            return
+
+        async def receive(self) -> AsyncIterator[LiveServerMessage]:
+            yield _input("new", finished=True)
+            yield _output("new reply", complete=True)
+            service._disconnecting = True
+            raise RuntimeError("end of fake stream")
+
+    def connect(**_kwargs: object) -> Connection:
+        return Connection()
+
+    def create_task(coroutine: Any, **_kwargs: Any) -> asyncio.Task[Any]:
+        return asyncio.create_task(coroutine)
+
+    monkeypatch.setattr(service, "create_task", create_task)
+    service._client = SimpleNamespace(  # type: ignore[assignment]
+        aio=SimpleNamespace(live=SimpleNamespace(connect=connect))
+    )
+    service._session = Connection()  # type: ignore[assignment]
+    await service._handle_msg_input_transcription(_input("old"))
+    await service._handle_msg_output_transcription(_output("old reply"))
+    await service._handle_msg_input_transcription(_input("old tail"))
+    await service._reconnect()
+    task: asyncio.Task[Any] | None = service._connection_task  # pyright: ignore[reportUnknownMemberType,reportUnknownVariableType]
+    assert task is not None
+    await task
+    assert [
+        (event.role, event.text)
+        for event in events
+        if event.type == SessionEventType.TRANSCRIPT_FINAL
+    ] == [
+        (TranscriptRole.USER, "old"),
+        (TranscriptRole.USER, "old tail"),
+        (TranscriptRole.ASSISTANT, "old reply"),
+        (TranscriptRole.USER, "new"),
+        (TranscriptRole.ASSISTANT, "new reply"),
+    ]
+    _assert_turns_settled(events)
 
 
 async def test_gemini_live_delegates_to_the_active_client() -> None:
