@@ -170,7 +170,7 @@ async def test_live_transcripts_stream_and_settle_without_logging() -> None:
             {"turn_id": "voice-1:1"},
         ),
         (SessionEventType.TRANSCRIPT_DELTA, TranscriptRole.ASSISTANT, "spoken ", {}),
-        (SessionEventType.TRANSCRIPT_DELTA, TranscriptRole.ASSISTANT, "answer", {}),
+        (SessionEventType.TRANSCRIPT_DELTA, TranscriptRole.ASSISTANT, "spoken answer", {}),
         (SessionEventType.TRANSCRIPT_FINAL, TranscriptRole.ASSISTANT, "spoken answer", {}),
     ]
     assert not any("private words" in line or "spoken answer" in line for line in logs)

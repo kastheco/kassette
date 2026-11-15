@@ -4,6 +4,7 @@
 
 ### fixed
 
+- Gemini Live assistant transcript deltas contain the full response so far, so terminal caption updates retain earlier fragments.
 - Gemini Live transcript fragments invalidate old settle deadlines before slow event delivery, so each update gets a full inactivity interval.
 - native terminal captions start fresh when the user turn changes, including with Quicksilver, while preserving cumulative updates within a turn.
 

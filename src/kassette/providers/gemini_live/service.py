@@ -188,7 +188,9 @@ class DelegatedGeminiLiveService(GeminiLiveLLMService):
             await self._finish_user_transcript()
             self._assistant_transcript = (self._assistant_transcript + text)[:_MAX_TRANSCRIPT_CHARS]
             await self._emit_transcript(
-                SessionEventType.TRANSCRIPT_DELTA, TranscriptRole.ASSISTANT, text
+                SessionEventType.TRANSCRIPT_DELTA,
+                TranscriptRole.ASSISTANT,
+                self._assistant_transcript,
             )
         if self._publish_client_events:
             await super()._handle_msg_output_transcription(message)  # pyright: ignore[reportPrivateUsage]
