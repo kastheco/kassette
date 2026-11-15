@@ -9,6 +9,7 @@ from kassette.terminal_runtime import (
     TerminalInputControl,
     close_terminal_session,
     session_event_envelope,
+    terminal_event_envelope,
     terminal_output_active_for_event,
 )
 
@@ -75,6 +76,22 @@ def test_quicksilver_delegation_and_transcript_reach_terminal_envelopes() -> Non
         "type": "transcript.final",
         "data": {"session_id": "voice", "role": "assistant", "text": "done"},
     }
+
+
+def test_gemini_transcripts_reach_terminal_without_duplicating_cascade() -> None:
+    event = SessionEvent(
+        session_id="voice",
+        type=SessionEventType.TRANSCRIPT_DELTA,
+        role=TranscriptRole.USER,
+        text="hello",
+        metadata={"turn_id": "voice:1"},
+    )
+    assert terminal_event_envelope(event, "gemini-live") == {
+        "label": "kassette",
+        "type": "transcript.delta",
+        "data": {"session_id": "voice", "role": "user", "text": "hello", "turn_id": "voice:1"},
+    }
+    assert terminal_event_envelope(event, "cascade") is None
 
 
 @pytest.mark.parametrize(

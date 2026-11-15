@@ -284,6 +284,27 @@ describe.sequential("pi-kassette extension delivery", () => {
     await app.shutdown();
   });
 
+  it.each(["gemini-live", "quicksilver"])("keeps %s native captions within each user turn", async (provider) => {
+    const app = harness(true);
+    await app.command();
+    try {
+      app.emit("provider.active", { provider_id: provider, capabilities: { mode: "native" } });
+      app.emit("transcript.final", { role: "user", turn_id: "turn-1", text: "previous words" });
+      app.emit("transcript.delta", { role: "user", turn_id: "turn-2", text: "new" });
+      expect(app.render().join("\n")).toContain("new");
+      expect(app.render().join("\n")).not.toContain("previous words");
+      app.emit("transcript.delta", { role: "user", turn_id: "turn-2", text: "new request" });
+      expect(app.render().join("\n")).toContain("new request");
+      expect(app.render().join("\n")).not.toContain("new new");
+      app.emit("transcript.final", { role: "user", turn_id: "turn-2", text: "corrected request" });
+      expect(app.render().join("\n")).toContain("corrected request");
+      expect(app.render().join("\n")).not.toContain("new request");
+      expect(app.sentMessages).toEqual([]);
+    } finally {
+      await app.shutdown();
+    }
+  });
+
   it("switches native Quicksilver turns to manual send and clears stale speaking", async () => {
     const app = harness(true);
     await app.command();

@@ -195,6 +195,8 @@ the extension connects to `http://127.0.0.1:7860` and starts `kassette serve` wh
 
 terminal sessions are loopback-only and use a one-use random capability. their control channel carries transcript, state, and real input/output level events. normal logs leave transcript and response text out.
 
+gemini-live terminal sessions stream user and assistant audio transcripts as `transcript.delta` and `transcript.final` events. user deltas are cumulative per `turn_id`, assistant deltas are cumulative per response, and final events contain the completed text up to 32,000 characters per user turn or assistant response. if the user interrupts playback, assistant finals may include generated text that wasn't played, so clients shouldn't treat them as a definitive record of spoken audio. longer text is truncated in both deltas and final events. `provider.active` advertises `supports_transcripts`.
+
 run the extension checks with:
 
 ```bash
