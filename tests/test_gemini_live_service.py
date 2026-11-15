@@ -540,14 +540,49 @@ async def test_tool_call_closes_turn_before_late_input(monkeypatch: pytest.Monke
     _assert_turns_settled(events)
 
 
+@pytest.mark.parametrize("publish_client_events", [False, True])
+async def test_cleanup_finalizes_pending_transcripts_once(publish_client_events: bool) -> None:
+    events: list[SessionEvent] = []
+
+    async def collect(event: SessionEvent) -> None:
+        events.append(event)
+
+    service = RecordingGeminiLiveService(
+        session_id="voice",
+        api_key="test-key",
+        model="gemini-3.8-live",
+        event_sink=collect,
+        publish_client_events=publish_client_events,
+    )
+    await service._handle_msg_input_transcription(_input("first"))
+    await service._handle_msg_output_transcription(_output("partial answer"))
+    await service._handle_msg_input_transcription(_input("last words"))
+
+    await service.cleanup()
+    await service.cleanup()
+
+    assert [
+        (event.role, event.text, event.metadata)
+        for event in events
+        if event.type == SessionEventType.TRANSCRIPT_FINAL
+    ] == [
+        (TranscriptRole.USER, "first", {"turn_id": "voice:1"}),
+        (TranscriptRole.USER, "last words", {"turn_id": "voice:2"}),
+        (TranscriptRole.ASSISTANT, "partial answer", {}),
+    ]
+    _assert_turns_settled(events)
+    assert service._user_settle_task is None
+
+
 async def test_cleanup_during_input_does_not_start_timer(monkeypatch: pytest.MonkeyPatch) -> None:
     entered, release, cleanup_entered, cleanup_release = (asyncio.Event() for _ in range(4))
     events: list[SessionEvent] = []
 
     async def collect(event: SessionEvent) -> None:
         events.append(event)
-        entered.set()
-        await release.wait()
+        if event.type == SessionEventType.TRANSCRIPT_DELTA:
+            entered.set()
+            await release.wait()
 
     async def cleanup(_service: GeminiLiveLLMService) -> None:
         cleanup_entered.set()
@@ -570,7 +605,8 @@ async def test_cleanup_during_input_does_not_start_timer(monkeypatch: pytest.Mon
     await asyncio.sleep(0.05)
     assert service._user_settle_task is None
     assert [(event.type, event.text) for event in events] == [
-        (SessionEventType.TRANSCRIPT_DELTA, "private")
+        (SessionEventType.TRANSCRIPT_DELTA, "private"),
+        (SessionEventType.TRANSCRIPT_FINAL, "private"),
     ]
 
 

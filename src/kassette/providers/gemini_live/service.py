@@ -278,9 +278,8 @@ class DelegatedGeminiLiveService(GeminiLiveLLMService):
     async def cleanup(self) -> None:
         self._closed = True
         self._cancel_pending_delegations()
-        if self._user_settle_task is not None:
-            self._user_settle_task.cancel()
-            self._user_settle_task = None
+        await self._finish_user_transcript()
+        await self._finish_assistant_transcript()
         await super().cleanup()
 
     async def _delegate(self, params: FunctionCallParams) -> None:
