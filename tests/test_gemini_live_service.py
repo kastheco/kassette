@@ -610,6 +610,63 @@ async def test_cleanup_during_input_does_not_start_timer(monkeypatch: pytest.Mon
     ]
 
 
+@pytest.mark.parametrize("publish_client_events", [False, True])
+@pytest.mark.parametrize("already_running", [False, True])
+async def test_cleanup_rejects_late_output(
+    monkeypatch: pytest.MonkeyPatch, publish_client_events: bool, already_running: bool
+) -> None:
+    entered, release, cleanup_entered, cleanup_release = (asyncio.Event() for _ in range(4))
+    events: list[SessionEvent] = []
+
+    async def collect(event: SessionEvent) -> None:
+        events.append(event)
+        if event.type == SessionEventType.TRANSCRIPT_FINAL and event.role == TranscriptRole.USER:
+            entered.set()
+            await release.wait()
+
+    async def cleanup(_service: GeminiLiveLLMService) -> None:
+        cleanup_entered.set()
+        await cleanup_release.wait()
+
+    monkeypatch.setattr(GeminiLiveLLMService, "cleanup", cleanup)
+    service = RecordingGeminiLiveService(
+        session_id="voice",
+        api_key="test-key",
+        model="gemini-3.8-live",
+        event_sink=collect,
+        publish_client_events=publish_client_events,
+    )
+    await service._handle_msg_output_transcription(_output("partial answer"))
+    frames_before = list(service.frames)
+    incoming: asyncio.Task[None] | None = None
+    if already_running:
+        await service._handle_msg_input_transcription(_input("last words"))
+        incoming = asyncio.create_task(service._handle_msg_output_transcription(_output("late")))
+        await entered.wait()
+    closing = asyncio.create_task(service.cleanup())
+    await cleanup_entered.wait()
+    try:
+        if incoming is not None:
+            release.set()
+            await incoming
+        else:
+            await service._handle_msg_output_transcription(_output("late"))
+    finally:
+        cleanup_release.set()
+        await closing
+
+    assert [
+        (event.type, event.text) for event in events if event.role == TranscriptRole.ASSISTANT
+    ] == [
+        (SessionEventType.TRANSCRIPT_DELTA, "partial answer"),
+        (SessionEventType.TRANSCRIPT_FINAL, "partial answer"),
+    ]
+    assert service._assistant_transcript == ""
+    assert [frame for frame in service.frames if isinstance(frame, TTSTextFrame)] == [
+        frame for frame in frames_before if isinstance(frame, TTSTextFrame)
+    ]
+
+
 async def test_real_reconnect_with_fake_live_connection(monkeypatch: pytest.MonkeyPatch) -> None:
     events: list[SessionEvent] = []
 

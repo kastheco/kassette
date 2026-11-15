@@ -181,11 +181,13 @@ class DelegatedGeminiLiveService(GeminiLiveLLMService):
     async def _handle_msg_output_transcription(self, message: LiveServerMessage) -> None:
         server_content = message.server_content
         transcription = server_content.output_transcription if server_content else None
-        if transcription is None:
+        if transcription is None or self._closed:
             return
         text = transcription.text or ""
         if text:
             await self._finish_user_transcript()
+            if self._closed:
+                return
             self._assistant_transcript = (self._assistant_transcript + text)[:_MAX_TRANSCRIPT_CHARS]
             await self._emit_transcript(
                 SessionEventType.TRANSCRIPT_DELTA,
