@@ -8,6 +8,7 @@
 
 ### fixed
 
+- Gemini Live disconnects during cleanup even if final transcript delivery fails.
 - Gemini Live rejects output fragments after closure, including handlers resuming after user finalization, so shutdown can't reopen a flushed transcript.
 - Gemini Live cleanup finalizes pending user and assistant transcripts before shutdown, so the last captions aren't left as deltas.
 - Gemini Live assistant transcript deltas contain the full response so far, so terminal caption updates retain earlier fragments.

@@ -280,9 +280,12 @@ class DelegatedGeminiLiveService(GeminiLiveLLMService):
     async def cleanup(self) -> None:
         self._closed = True
         self._cancel_pending_delegations()
-        await self._finish_user_transcript()
-        await self._finish_assistant_transcript()
-        await super().cleanup()
+        try:
+            await self._finish_user_transcript()
+            await self._finish_assistant_transcript()
+        finally:
+            # Final delivery can fail on a stalled client; the Live connection must still close.
+            await super().cleanup()
 
     async def _delegate(self, params: FunctionCallParams) -> None:
         request = params.arguments.get("request")

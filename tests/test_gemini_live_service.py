@@ -574,6 +574,40 @@ async def test_cleanup_finalizes_pending_transcripts_once(publish_client_events:
     assert service._user_settle_task is None
 
 
+@pytest.mark.parametrize("role", [TranscriptRole.USER, TranscriptRole.ASSISTANT])
+async def test_cleanup_disconnects_when_final_delivery_fails(
+    monkeypatch: pytest.MonkeyPatch, role: TranscriptRole
+) -> None:
+    calls: list[str] = []
+
+    async def fail_final(event: SessionEvent) -> None:
+        if event.type == SessionEventType.TRANSCRIPT_FINAL:
+            raise RuntimeError("event queue full")
+
+    service = RecordingGeminiLiveService(
+        session_id="voice", api_key="test-key", model="gemini-3.8-live", event_sink=fail_final
+    )
+    if role == TranscriptRole.USER:
+        await service._handle_msg_input_transcription(_input("words"))
+    else:
+        await service._handle_msg_output_transcription(_output("words"))
+
+    parent_cleanup = GeminiLiveLLMService.cleanup
+
+    async def record_parent(instance: GeminiLiveLLMService) -> None:
+        calls.append("parent")
+        await parent_cleanup(instance)
+
+    async def record_disconnect() -> None:
+        calls.append("disconnect")
+
+    monkeypatch.setattr(GeminiLiveLLMService, "cleanup", record_parent)
+    monkeypatch.setattr(service, "_disconnect", record_disconnect)
+    with pytest.raises(RuntimeError, match="event queue full"):
+        await service.cleanup()
+    assert calls == ["parent", "disconnect"]
+
+
 async def test_cleanup_during_input_does_not_start_timer(monkeypatch: pytest.MonkeyPatch) -> None:
     entered, release, cleanup_entered, cleanup_release = (asyncio.Event() for _ in range(4))
     events: list[SessionEvent] = []
