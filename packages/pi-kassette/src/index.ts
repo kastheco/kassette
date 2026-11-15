@@ -53,6 +53,7 @@ export function createPiKassette(
   let pendingDelegationId: string | undefined;
   let pendingDelegationText: string | undefined;
   let nativeTranscript = "";
+  let nativeTurnId: string | undefined;
   let lastAutoSendToggleAt = 0;
   let surface: VoiceSurface | undefined;
   let editorBeforeVoice = "";
@@ -160,6 +161,11 @@ export function createPiKassette(
       if (providerMode === "native" && typeof text === "string") {
         const final = message.type === "transcript.final";
         if (data.role === "user") {
+          const turnId = data.turn_id;
+          if (typeof turnId === "string" && turnId !== nativeTurnId) {
+            nativeTurnId = turnId;
+            nativeTranscript = "";
+          }
           nativeTranscript = final ? text.trim() : mergeTranscriptDelta(nativeTranscript, text);
           dispatch({ type: "transcript", text: nativeTranscript, final });
         } else if (data.role === "assistant") responseCaption = text;
@@ -232,6 +238,7 @@ export function createPiKassette(
     pendingDelegationId = undefined;
     pendingDelegationText = undefined;
     nativeTranscript = "";
+    nativeTurnId = undefined;
     lastAutoSendToggleAt = 0;
     inputPaused = false;
     desiredInputPaused = true;

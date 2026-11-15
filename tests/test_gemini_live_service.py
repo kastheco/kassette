@@ -353,6 +353,60 @@ async def test_linked_web_frames_keep_captions_out_of_trace_logs() -> None:
     assert not any("private input" in line or "private output" in line for line in logs)
 
 
+async def test_new_fragment_invalidates_deadline_before_slow_delivery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[SessionEvent] = []
+    deadlines: asyncio.Queue[asyncio.Future[None]] = asyncio.Queue()
+    delivering = asyncio.Event()
+    delivered = asyncio.Event()
+    yield_control = asyncio.sleep
+
+    async def wait_for_deadline(_seconds: float) -> None:
+        deadline: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        await deadlines.put(deadline)
+        await deadline
+
+    async def collect(event: SessionEvent) -> None:
+        events.append(event)
+        if event.type == SessionEventType.TRANSCRIPT_DELTA and event.text == "first second":
+            delivering.set()
+            await delivered.wait()
+
+    monkeypatch.setattr(asyncio, "sleep", wait_for_deadline)
+    service = RecordingGeminiLiveService(
+        session_id="voice", api_key="test-key", model="gemini-3.8-live", event_sink=collect
+    )
+    await service._handle_msg_input_transcription(_input("first"))
+    old_deadline = await deadlines.get()
+    delivery = asyncio.create_task(service._handle_msg_input_transcription(_input(" second")))
+    try:
+        await delivering.wait()
+        if not old_deadline.done():
+            old_deadline.set_result(None)
+        await yield_control(0)
+        assert [event.type for event in events] == [
+            SessionEventType.TRANSCRIPT_DELTA,
+            SessionEventType.TRANSCRIPT_DELTA,
+        ]
+        delivered.set()
+        await delivery
+        new_deadline = await deadlines.get()
+        assert all(event.type != SessionEventType.TRANSCRIPT_FINAL for event in events)
+        new_deadline.set_result(None)
+        await yield_control(0)
+        assert (events[-1].type, events[-1].text, events[-1].metadata) == (
+            SessionEventType.TRANSCRIPT_FINAL,
+            "first second",
+            {"turn_id": "voice:1"},
+        )
+        _assert_turns_settled(events)
+    finally:
+        delivered.set()
+        await delivery
+        await service.cleanup()
+
+
 async def test_unanswered_new_turn_settles_after_turn_complete() -> None:
     events: list[SessionEvent] = []
 

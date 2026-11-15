@@ -1,5 +1,12 @@
 # changelog
 
+## unreleased
+
+### fixed
+
+- Gemini Live transcript fragments invalidate old settle deadlines before slow event delivery, so each update gets a full inactivity interval.
+- native terminal captions start fresh when the user turn changes, including with Quicksilver, while preserving cumulative updates within a turn.
+
 ## 0.3.0
 
 ### added

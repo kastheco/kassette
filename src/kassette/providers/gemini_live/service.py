@@ -159,16 +159,22 @@ class DelegatedGeminiLiveService(GeminiLiveLLMService):
                 self._user_turn_id = f"{self._session_id}:{self._user_turn_number}"
                 text = text.lstrip()
         if text and self._user_turn_id is not None:
+            turn_id = self._user_turn_id
+            # Delivery can suspend past the previous fragment's deadline.
+            if self._user_settle_task is not None:
+                self._user_settle_task.cancel()
+                self._user_settle_task = None
             self._user_transcript = (self._user_transcript + text)[:_MAX_TRANSCRIPT_CHARS]
             await self._emit_transcript(
                 SessionEventType.TRANSCRIPT_DELTA,
                 TranscriptRole.USER,
                 self._user_transcript.rstrip(),
-                turn_id=self._user_turn_id,
+                turn_id=turn_id,
             )
             if self._closed:
                 return
-            self._schedule_user_settle(self._user_turn_id)
+            if self._user_turn_id == turn_id:
+                self._schedule_user_settle(turn_id)
         if transcription.finished:
             await self._finish_user_transcript()
 
